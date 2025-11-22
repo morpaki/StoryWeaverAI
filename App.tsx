@@ -1,0 +1,249 @@
+
+import React, { useState, useEffect } from 'react';
+import { AppState, Book, BrainstormConfig, LLMConfig, PromptKind, ProviderConfigs, SummaryConfig } from './types';
+import { Library } from './components/Library';
+import { Editor } from './components/Editor';
+import { db } from './services/db';
+
+const STORAGE_KEY = 'storyweaver_data';
+
+const DEFAULT_GOOGLE_CONFIG: LLMConfig = { provider: 'google', apiKey: '', modelName: 'gemini-2.5-flash', availableModels: ['gemini-2.5-flash', 'gemini-2.5-pro'] };
+const DEFAULT_OPENROUTER_CONFIG: LLMConfig = { provider: 'openrouter', apiKey: '', modelName: 'google/gemini-2.0-flash-001', availableModels: [] };
+const DEFAULT_LMSTUDIO_CONFIG: LLMConfig = { provider: 'lmstudio', apiKey: '', modelName: 'local-model', baseUrl: 'http://localhost:1234/v1', availableModels: [] };
+
+const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
+  google: DEFAULT_GOOGLE_CONFIG,
+  openrouter: DEFAULT_OPENROUTER_CONFIG,
+  lmstudio: DEFAULT_LMSTUDIO_CONFIG
+};
+
+const DEFAULT_SYSTEM_INSTRUCTION = `You are a co-author. 
+Style: Engaging, descriptive, and coherent with the existing text.
+Output: Only the story continuation. No meta-talk.`;
+
+const DEFAULT_BRAINSTORM_CONFIG: BrainstormConfig = {
+    provider: 'google',
+    model: 'gemini-2.5-flash',
+    systemInstruction: 'You are a helpful creative writing assistant. Help the user brainstorm ideas, solve plot holes, and develop characters. \n\nVariables available: {currentChapter}, {pov}, {chapterSummary:1}, {lastWords:500}'
+};
+
+const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
+    provider: 'google',
+    model: 'gemini-2.5-flash',
+    systemInstruction: 'Summarize the provided chapter content in 3-5 sentences. Focus on key plot points and character developments.'
+};
+
+const App: React.FC = () => {
+  // --- State Initialization ---
+  const [state, setState] = useState<AppState>({
+    view: 'library',
+    activeBookId: null,
+    activeChapterId: null,
+    books: [],
+    brainstormConfig: DEFAULT_BRAINSTORM_CONFIG,
+    summaryConfig: DEFAULT_SUMMARY_CONFIG,
+    providerConfigs: DEFAULT_PROVIDER_CONFIGS,
+    promptKinds: []
+  });
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  // --- Data Loading & Migration ---
+  useEffect(() => {
+    const initData = async () => {
+      try {
+        // 1. Load from IndexedDB
+        const dbBooks = await db.getAllBooks();
+        const dbSettings = await db.getSettings();
+        const dbPromptKinds = await db.getAllPromptKinds();
+
+        // Prepare Data
+        let promptKinds = dbPromptKinds as any[]; 
+        let providerConfigs = dbSettings?.providers || DEFAULT_PROVIDER_CONFIGS;
+        let brainstormConfig = dbSettings?.brainstorm || DEFAULT_BRAINSTORM_CONFIG;
+        let summaryConfig = dbSettings?.summary || DEFAULT_SUMMARY_CONFIG;
+
+        // Migration: PromptKinds
+        const migratedPromptKinds: PromptKind[] = promptKinds.map((pk: any) => {
+             if (pk.config) {
+                 // Old format detected
+                 return {
+                     id: pk.id,
+                     name: pk.name,
+                     description: pk.description,
+                     systemInstruction: pk.systemInstruction,
+                     provider: pk.config.provider || 'google',
+                     model: pk.config.modelName || 'gemini-2.5-flash'
+                 };
+             }
+             return pk as PromptKind;
+        });
+
+        // Ensure default prompt kind
+        if (migratedPromptKinds.length === 0) {
+            const defaultKind: PromptKind = {
+                id: 'default-story-continuation',
+                name: 'Continue Story',
+                description: 'Standard story continuation based on context.',
+                systemInstruction: DEFAULT_SYSTEM_INSTRUCTION,
+                provider: 'google',
+                model: 'gemini-2.5-flash'
+            };
+            await db.savePromptKind(defaultKind);
+            migratedPromptKinds.push(defaultKind);
+        }
+
+        // Migration: Old "llmConfig" settings to "brainstormConfig"
+        if (dbSettings && !dbSettings.brainstorm && (dbSettings as any).active) {
+            const oldActive = (dbSettings as any).active;
+            brainstormConfig = {
+                provider: oldActive.provider || 'google',
+                model: oldActive.modelName || 'gemini-2.5-flash',
+                systemInstruction: DEFAULT_BRAINSTORM_CONFIG.systemInstruction
+            };
+            // Also ensure provider config is set from old active
+             if (!dbSettings?.providers) {
+                const p = oldActive.provider || 'google';
+                providerConfigs = {
+                    ...DEFAULT_PROVIDER_CONFIGS,
+                    [p]: { ...DEFAULT_PROVIDER_CONFIGS[p as keyof ProviderConfigs], ...oldActive }
+                };
+             }
+        }
+
+        // Migration: Ensure books have characters array and characters have image property, and POV
+        const migratedBooks = dbBooks.map(b => ({
+            ...b,
+            pov: b.pov || '',
+            characters: (b.characters || []).map((c: any) => ({
+                ...c,
+                image: c.image || null
+            }))
+        }));
+
+        // Save migrated defaults if missing in DB (lazy migration)
+        if (!dbSettings?.summary) {
+            await db.saveSettings(brainstormConfig, summaryConfig, providerConfigs);
+        }
+
+        setState(prev => ({
+            ...prev,
+            books: migratedBooks,
+            brainstormConfig: brainstormConfig,
+            summaryConfig: summaryConfig,
+            providerConfigs: providerConfigs,
+            promptKinds: migratedPromptKinds
+        }));
+      } catch (err) {
+        console.error("DB Initialization error", err);
+      } finally {
+        setIsLoaded(true);
+      }
+    };
+
+    initData();
+  }, []);
+
+  // --- Actions ---
+
+  const createBook = () => {
+    const newBook: Book = {
+      id: crypto.randomUUID(),
+      title: 'Untitled Story',
+      coverImage: null,
+      chapters: [],
+      codex: [],
+      characters: [],
+      lastModified: Date.now(),
+      pov: ''
+    };
+    db.saveBook(newBook).catch(console.error);
+    setState(prev => ({ ...prev, books: [...prev.books, newBook] }));
+  };
+
+  const updateBook = (id: string, updates: Partial<Book>) => {
+    setState(prev => {
+      const newBooks = prev.books.map(b => {
+        if (b.id === id) {
+          const updated = { ...b, ...updates };
+          db.saveBook(updated).catch(console.error);
+          return updated;
+        }
+        return b;
+      });
+      return { ...prev, books: newBooks };
+    });
+  };
+
+  const deleteBook = (id: string) => {
+    if (!window.confirm("Are you sure you want to delete this book?")) return;
+    db.deleteBook(id).catch(console.error);
+    setState(prev => ({
+      ...prev,
+      books: prev.books.filter(b => b.id !== id),
+      activeBookId: prev.activeBookId === id ? null : prev.activeBookId
+    }));
+  };
+
+  const openBook = (id: string) => {
+    setState(prev => ({ ...prev, activeBookId: id, view: 'editor' }));
+  };
+
+  const closeBook = () => {
+    setState(prev => ({ ...prev, activeBookId: null, view: 'library' }));
+  };
+
+  const updateSettings = (brainstormConfig: BrainstormConfig, summaryConfig: SummaryConfig, providerConfigs: ProviderConfigs) => {
+    db.saveSettings(brainstormConfig, summaryConfig, providerConfigs).catch(console.error);
+    setState(prev => ({ ...prev, brainstormConfig, summaryConfig, providerConfigs }));
+  };
+
+  const managePromptKinds = {
+      add: (kind: PromptKind) => {
+          db.savePromptKind(kind).catch(console.error);
+          setState(prev => ({ ...prev, promptKinds: [...prev.promptKinds, kind] }));
+      },
+      update: (kind: PromptKind) => {
+          db.savePromptKind(kind).catch(console.error);
+          setState(prev => ({ ...prev, promptKinds: prev.promptKinds.map(k => k.id === kind.id ? kind : k) }));
+      },
+      delete: (id: string) => {
+          db.deletePromptKind(id).catch(console.error);
+          setState(prev => ({ ...prev, promptKinds: prev.promptKinds.filter(k => k.id !== id) }));
+      }
+  };
+
+  if (!isLoaded) {
+    return <div className="h-screen w-screen bg-slate-950 flex items-center justify-center text-slate-500">Loading...</div>;
+  }
+
+  if (state.view === 'editor' && state.activeBookId) {
+    const activeBook = state.books.find(b => b.id === state.activeBookId);
+    if (activeBook) {
+      return (
+        <Editor
+          book={activeBook}
+          onBack={closeBook}
+          onUpdateBook={updateBook}
+          brainstormConfig={state.brainstormConfig}
+          summaryConfig={state.summaryConfig}
+          providerConfigs={state.providerConfigs}
+          onUpdateSettings={updateSettings}
+          promptKinds={state.promptKinds}
+          onManagePromptKinds={managePromptKinds}
+        />
+      );
+    }
+  }
+
+  return (
+    <Library
+      books={state.books}
+      onCreateBook={createBook}
+      onOpenBook={openBook}
+      onUpdateBook={updateBook}
+      onDeleteBook={deleteBook}
+    />
+  );
+};
+
+export default App;

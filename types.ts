@@ -1,0 +1,97 @@
+
+export interface CodexItem {
+  id: string;
+  title: string;
+  content: string;
+  tags: string[]; // Tags that trigger injection
+  isGlobal?: boolean; // Always inject if true
+}
+
+export interface Character {
+  id: string;
+  name: string; // For identification in UI
+  aliases: string[]; // Triggers for injection
+  description: string; // Content sent to LLM
+  isGlobal: boolean;
+  image: string | null; // Base64 data URL
+}
+
+export interface Chapter {
+  id: string;
+  title: string;
+  summary: string;
+  content: string;
+  order: number;
+}
+
+export interface Book {
+  id: string;
+  title: string;
+  coverImage: string | null; // Base64 data URL
+  chapters: Chapter[];
+  codex: CodexItem[];
+  characters: Character[];
+  lastModified: number;
+  pov: string; // Point of View configuration
+}
+
+export interface Message {
+  role: 'user' | 'model' | 'system';
+  content: string;
+}
+
+export type LLMProvider = 'google' | 'openrouter' | 'lmstudio';
+
+// Configuration for a specific provider (API keys, caching models)
+export interface LLMConfig {
+  provider: LLMProvider;
+  apiKey: string;
+  modelName: string; // Default model fallback
+  baseUrl?: string; // For local/openrouter
+  availableModels?: string[]; // Cached list of models
+}
+
+// Configuration for the Brainstorming feature
+export interface BrainstormConfig {
+  provider: LLMProvider;
+  model: string;
+  systemInstruction: string;
+}
+
+// Configuration for Auto Summary
+export interface SummaryConfig {
+  provider: LLMProvider;
+  model: string;
+  systemInstruction: string;
+}
+
+export type BrainstormContextType = 'none' | 'current_chapter' | 'all_summaries' | 'selected_summaries';
+
+export interface PromptKind {
+  id: string;
+  name: string;
+  description?: string;
+  systemInstruction: string;
+  provider: LLMProvider;
+  model: string; 
+}
+
+export type ProviderConfigs = Record<LLMProvider, LLMConfig>;
+
+export interface AppState {
+  view: 'library' | 'editor';
+  activeBookId: string | null;
+  activeChapterId: string | null;
+  books: Book[];
+  
+  // Active settings for Brainstorming
+  brainstormConfig: BrainstormConfig; 
+  
+  // Active settings for Summaries
+  summaryConfig: SummaryConfig;
+
+  // Global repository of settings per provider
+  providerConfigs: ProviderConfigs;
+
+  promptKinds: PromptKind[];
+}

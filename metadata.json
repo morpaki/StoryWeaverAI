@@ -1,0 +1,5 @@
+{
+  "name": "StoryWeaver AI",
+  "description": "A comprehensive story writing assistant featuring book management, chapter organization, context-aware codex entries, and multi-LLM support.",
+  "requestFramePermissions": []
+}
