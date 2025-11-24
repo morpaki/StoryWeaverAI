@@ -1,6 +1,7 @@
+
 import React, { useRef, useState } from 'react';
 import { Book } from '../types';
-import { Plus, MoreVertical, Trash2, Edit2, Image as ImageIcon } from 'lucide-react';
+import { Plus, MoreVertical, Trash2, Edit2, Image as ImageIcon, Download } from 'lucide-react';
 
 interface LibraryProps {
   books: Book[];
@@ -35,6 +36,59 @@ export const Library: React.FC<LibraryProps> = ({
   const triggerFileSelect = (bookId: string) => {
     const input = document.getElementById(`file-input-${bookId}`) as HTMLInputElement;
     input?.click();
+  };
+
+  const handleExportBook = (book: Book) => {
+    const sortedChapters = [...book.chapters].sort((a, b) => a.order - b.order);
+    
+    // Simple HTML escaper
+    const escapeHtml = (text: string) => {
+      const div = document.createElement('div');
+      div.innerText = text || '';
+      return div.innerHTML;
+    };
+
+    let htmlContent = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${escapeHtml(book.title)}</title>
+    <style>
+        body { font-family: 'Times New Roman', serif; line-height: 1.8; max-width: 800px; margin: 0 auto; padding: 4rem 2rem; background-color: #ffffff; color: #2d3748; }
+        h1 { text-align: center; font-size: 3rem; margin-bottom: 4rem; border-bottom: 2px solid #cbd5e0; padding-bottom: 2rem; }
+        .chapter { margin-bottom: 6rem; page-break-after: always; }
+        .chapter-header { text-align: center; margin-bottom: 3rem; }
+        .chapter-number { font-size: 1.5rem; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; color: #4a5568; margin-bottom: 0.5rem; }
+        .chapter-content { white-space: pre-wrap; text-align: justify; font-size: 1.2rem; }
+    </style>
+</head>
+<body>
+    <h1>${escapeHtml(book.title)}</h1>
+`;
+
+    sortedChapters.forEach((chapter, index) => {
+        htmlContent += `
+    <div class="chapter">
+        <div class="chapter-header">
+            <div class="chapter-number">Chapter ${index + 1}</div>
+        </div>
+        <div class="chapter-content">${escapeHtml(chapter.content)}</div>
+    </div>
+`;
+    });
+
+    htmlContent += `</body></html>`;
+
+    const blob = new Blob([htmlContent], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${book.title.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -118,6 +172,15 @@ export const Library: React.FC<LibraryProps> = ({
                             className="hidden" 
                             onChange={(e) => handleImageUpload(book.id, e)} 
                         />
+                        <button 
+                          onClick={() => {
+                            handleExportBook(book);
+                            setMenuOpenId(null);
+                          }}
+                          className="w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-slate-700 flex items-center gap-2"
+                        >
+                          <Download size={14} /> Export HTML
+                        </button>
                         <div className="h-px bg-slate-700 my-1" />
                         <button 
                           onClick={() => onDeleteBook(book.id)}

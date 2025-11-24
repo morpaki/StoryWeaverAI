@@ -50,7 +50,10 @@ export class LLMService {
   }
 
   private static getGenericBaseUrl(config: LLMConfig): string {
-      return config.baseUrl || (config.provider === 'openrouter' ? 'https://openrouter.ai/api/v1' : 'http://localhost:1234/v1');
+      if (config.baseUrl) return config.baseUrl;
+      if (config.provider === 'openrouter') return 'https://openrouter.ai/api/v1';
+      if (config.provider === 'venice') return 'https://api.venice.ai/api/v1';
+      return 'http://localhost:1234/v1';
   }
 
   private static async generateGemini(
@@ -78,7 +81,9 @@ export class LLMService {
         const chat = ai.chats.create({
             model: config.modelName || 'gemini-2.5-flash',
             config: {
-                systemInstruction: systemInstruction
+                systemInstruction: systemInstruction,
+                maxOutputTokens: config.maxTokens,
+                temperature: config.temperature
             },
             history: chatHistory
         });
@@ -92,6 +97,8 @@ export class LLMService {
             contents: prompt,
             config: {
                 systemInstruction: systemInstruction,
+                maxOutputTokens: config.maxTokens,
+                temperature: config.temperature
             }
         });
         return response.text || "";
@@ -129,7 +136,8 @@ export class LLMService {
             body: JSON.stringify({
                 model: config.modelName,
                 messages: messages,
-                temperature: 0.7
+                temperature: config.temperature ?? 0.7,
+                max_tokens: config.maxTokens
             })
         });
 

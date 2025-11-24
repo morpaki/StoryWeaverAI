@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig } from '../types';
 import { 
   ArrowLeft, Plus, Save, Send, Sparkles, Settings, BookOpen, 
-  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User
+  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders
 } from 'lucide-react';
 import { LLMService } from '../services/llmService';
 
@@ -24,6 +24,19 @@ interface EditorProps {
       delete: (id: string) => void;
   };
 }
+
+const POV_OPTIONS = [
+    "3rd Person Omniscient",
+    "3rd Person Limited",
+    "1st Person",
+    "2nd Person"
+];
+
+const TENSE_OPTIONS = [
+    "Past Tense",
+    "Present Tense",
+    "Future Tense"
+];
 
 export const Editor: React.FC<EditorProps> = ({
   book,
@@ -108,7 +121,10 @@ export const Editor: React.FC<EditorProps> = ({
     let result = text;
 
     // {pov}
-    result = result.replace(/{pov}/g, currentBook.pov || 'Not specified');
+    result = result.replace(/{pov}/g, currentBook.pov || '3rd Person Omniscient');
+
+    // {tense}
+    result = result.replace(/{tense}/g, currentBook.tense || 'Past Tense');
 
     // {currentChapter}
     result = result.replace(/{currentChapter}/g, currentChapter ? currentChapter.content : '');
@@ -286,9 +302,11 @@ export const Editor: React.FC<EditorProps> = ({
           id: crypto.randomUUID(),
           name: 'New Prompt Kind',
           description: '',
-          systemInstruction: "You are a co-author. Style: Engaging, descriptive. Output: Only story continuation.",
+          systemInstruction: "You are a co-author. Write in {pov} using {tense}. Style: Engaging, descriptive. Output: Only story continuation.",
           provider: 'google',
-          model: 'gemini-2.5-flash'
+          model: 'gemini-2.5-flash',
+          maxTokens: 2048,
+          temperature: 0.7
       });
       setIsKindModalOpen(true);
   };
@@ -330,11 +348,12 @@ export const Editor: React.FC<EditorProps> = ({
 
   // --- LLM Operations ---
 
-  const getRuntimeConfig = (provider: LLMProvider, modelName: string): LLMConfig => {
+  const getRuntimeConfig = (provider: LLMProvider, modelName: string, overrides?: Partial<LLMConfig>): LLMConfig => {
       const globalConf = providerConfigs[provider];
       return {
           ...globalConf,
-          modelName: modelName // Override with specific model
+          modelName: modelName, // Override with specific model
+          ...overrides
       };
   };
 
@@ -406,14 +425,35 @@ export const Editor: React.FC<EditorProps> = ({
 
     const contextBlocks: string[] = [];
 
+    // Inject Story So Far (Previous Chapter Summaries)
+    const sortedChapters = [...book.chapters].sort((a, b) => a.order - b.order);
+    const previousChapters = sortedChapters.filter(c => c.order < activeChapter.order);
+    const storySoFar = previousChapters
+        .filter(c => c.summary && c.summary.trim())
+        .map(c => `[${c.title}]: ${c.summary}`)
+        .join('\n');
+    
+    if (storySoFar) {
+        contextBlocks.push(`STORY SO FAR:\n${storySoFar}`);
+    }
+
+    // Merge Codex and Characters into a unified context list
+    const combinedContextItems: string[] = [];
+
     if (relevantCodex.length > 0) {
-        const codexText = relevantCodex.map(c => `[${c.title}${c.isGlobal ? ' (Global)' : ''}]: ${c.content}`).join('\n');
-        contextBlocks.push(`CODEX INFORMATION:\n${codexText}`);
+        relevantCodex.forEach(c => {
+             combinedContextItems.push(`[${c.title}${c.isGlobal ? ' (Global)' : ''}]: ${c.content}`);
+        });
     }
 
     if (relevantChars.length > 0) {
-        const charText = relevantChars.map(c => `[${c.name}]: ${c.description}`).join('\n');
-        contextBlocks.push(`CHARACTERS CONTEXT:\n${charText}`);
+        relevantChars.forEach(c => {
+            combinedContextItems.push(`[${c.name}]: ${c.description}`);
+        });
+    }
+
+    if (combinedContextItems.length > 0) {
+        contextBlocks.push(combinedContextItems.join('\n'));
     }
 
     if (contextBlocks.length > 0) {
@@ -428,7 +468,10 @@ export const Editor: React.FC<EditorProps> = ({
     Instruction: ${activePrompt}`;
 
     // 5. Construct Configuration on the fly
-    const config = getRuntimeConfig(selectedKind.provider, selectedKind.model);
+    const config = getRuntimeConfig(selectedKind.provider, selectedKind.model, {
+        maxTokens: selectedKind.maxTokens || 2048,
+        temperature: selectedKind.temperature ?? 0.7
+    });
 
     try {
       const result = await LLMService.generateCompletion(
@@ -863,12 +906,30 @@ export const Editor: React.FC<EditorProps> = ({
                         <div className="space-y-3">
                              <div>
                                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Point of View (POV)</label>
-                                <input 
-                                    className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
-                                    value={book.pov}
-                                    onChange={(e) => onUpdateBook(book.id, { pov: e.target.value })}
-                                    placeholder="e.g. Third Person Limited"
-                                />
+                                <div className="relative">
+                                    <select 
+                                        className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
+                                        value={book.pov}
+                                        onChange={(e) => onUpdateBook(book.id, { pov: e.target.value })}
+                                    >
+                                        {POV_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                    </select>
+                                    <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Tense</label>
+                                <div className="relative">
+                                    <select 
+                                        className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
+                                        value={book.tense}
+                                        onChange={(e) => onUpdateBook(book.id, { tense: e.target.value })}
+                                    >
+                                        {TENSE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                    </select>
+                                    <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
+                                </div>
                             </div>
                         </div>
                      </div>
@@ -877,13 +938,13 @@ export const Editor: React.FC<EditorProps> = ({
                         <h4 className="text-xs font-bold text-slate-400 uppercase mb-4 border-b border-slate-800 pb-2">Global Provider Configuration</h4>
                         
                         <div className="flex bg-slate-950 rounded p-1 mb-4">
-                            {(['google', 'openrouter', 'lmstudio'] as LLMProvider[]).map(p => (
+                            {(['google', 'openrouter', 'lmstudio', 'venice'] as LLMProvider[]).map(p => (
                                 <button
                                     key={p}
                                     onClick={() => setSettingsSelectedProvider(p)}
                                     className={`flex-1 text-xs py-1 rounded capitalize ${settingsSelectedProvider === p ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
                                 >
-                                    {p === 'lmstudio' ? 'LM Studio' : p}
+                                    {p === 'lmstudio' ? 'LM Studio' : p === 'venice' ? 'Venice' : p}
                                 </button>
                             ))}
                         </div>
@@ -895,7 +956,7 @@ export const Editor: React.FC<EditorProps> = ({
                                     <input 
                                         type="password"
                                         className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
-                                        value={providerConfigs[settingsSelectedProvider].apiKey}
+                                        value={providerConfigs[settingsSelectedProvider]?.apiKey || ''}
                                         onChange={(e) => updateProviderConfig(settingsSelectedProvider, { apiKey: e.target.value })}
                                         placeholder="Enter Key"
                                     />
@@ -908,7 +969,7 @@ export const Editor: React.FC<EditorProps> = ({
                                     <input 
                                         type="text"
                                         className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
-                                        value={providerConfigs[settingsSelectedProvider].baseUrl || ''}
+                                        value={providerConfigs[settingsSelectedProvider]?.baseUrl || ''}
                                         onChange={(e) => updateProviderConfig(settingsSelectedProvider, { baseUrl: e.target.value })}
                                         placeholder="e.g. http://localhost:1234/v1"
                                     />
@@ -927,7 +988,7 @@ export const Editor: React.FC<EditorProps> = ({
                                      </button>
                                 </div>
                                 <div className="bg-slate-950 border border-slate-800 rounded h-32 overflow-y-auto p-2 custom-scrollbar">
-                                    {providerConfigs[settingsSelectedProvider].availableModels?.length ? (
+                                    {providerConfigs[settingsSelectedProvider]?.availableModels?.length ? (
                                         providerConfigs[settingsSelectedProvider].availableModels?.map(m => (
                                             <div key={m} className="text-xs text-slate-400 py-0.5">{m}</div>
                                         ))
@@ -954,6 +1015,7 @@ export const Editor: React.FC<EditorProps> = ({
                                     <option value="google">Google Gemini</option>
                                     <option value="openrouter">OpenRouter</option>
                                     <option value="lmstudio">LM Studio</option>
+                                    <option value="venice">Venice AI</option>
                                 </select>
                             </div>
 
@@ -966,10 +1028,10 @@ export const Editor: React.FC<EditorProps> = ({
                                         onChange={(e) => onUpdateSettings({...brainstormConfig, model: e.target.value}, summaryConfig, providerConfigs)}
                                     >
                                         <option value="" disabled>Select Model</option>
-                                        {providerConfigs[brainstormConfig.provider].availableModels?.map(m => (
+                                        {providerConfigs[brainstormConfig.provider]?.availableModels?.map(m => (
                                             <option key={m} value={m}>{m}</option>
                                         ))}
-                                         {brainstormConfig.model && !providerConfigs[brainstormConfig.provider].availableModels?.includes(brainstormConfig.model) && (
+                                         {brainstormConfig.model && !providerConfigs[brainstormConfig.provider]?.availableModels?.includes(brainstormConfig.model) && (
                                             <option value={brainstormConfig.model}>{brainstormConfig.model} (Unlisted)</option>
                                         )}
                                     </select>
@@ -983,7 +1045,7 @@ export const Editor: React.FC<EditorProps> = ({
                                     className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed"
                                     value={brainstormConfig.systemInstruction}
                                     onChange={(e) => onUpdateSettings({...brainstormConfig, systemInstruction: e.target.value}, summaryConfig, providerConfigs)}
-                                    placeholder="Variables: {currentChapter}, {pov}, {chapterSummary:1}, {lastWords:500}"
+                                    placeholder="Variables: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}"
                                 />
                             </div>
                         </div>
@@ -1004,6 +1066,7 @@ export const Editor: React.FC<EditorProps> = ({
                                     <option value="google">Google Gemini</option>
                                     <option value="openrouter">OpenRouter</option>
                                     <option value="lmstudio">LM Studio</option>
+                                    <option value="venice">Venice AI</option>
                                 </select>
                             </div>
 
@@ -1016,10 +1079,10 @@ export const Editor: React.FC<EditorProps> = ({
                                         onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, model: e.target.value}, providerConfigs)}
                                     >
                                         <option value="" disabled>Select Model</option>
-                                        {providerConfigs[summaryConfig.provider].availableModels?.map(m => (
+                                        {providerConfigs[summaryConfig.provider]?.availableModels?.map(m => (
                                             <option key={m} value={m}>{m}</option>
                                         ))}
-                                         {summaryConfig.model && !providerConfigs[summaryConfig.provider].availableModels?.includes(summaryConfig.model) && (
+                                         {summaryConfig.model && !providerConfigs[summaryConfig.provider]?.availableModels?.includes(summaryConfig.model) && (
                                             <option value={summaryConfig.model}>{summaryConfig.model} (Unlisted)</option>
                                         )}
                                     </select>
@@ -1033,7 +1096,7 @@ export const Editor: React.FC<EditorProps> = ({
                                     className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed"
                                     value={summaryConfig.systemInstruction}
                                     onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, systemInstruction: e.target.value}, providerConfigs)}
-                                     placeholder="Variables: {currentChapter}, {pov}, {chapterSummary:1}, {lastWords:500}"
+                                     placeholder="Variables: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}"
                                 />
                             </div>
                         </div>
@@ -1069,13 +1132,13 @@ export const Editor: React.FC<EditorProps> = ({
        {/* Prompt Kind Editor Modal */}
        {isKindModalOpen && editingKind && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setIsKindModalOpen(false)}>
-            <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[600px] max-w-[90vw] flex flex-col overflow-hidden h-[80vh]" onClick={(e) => e.stopPropagation()}>
+            <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[600px] max-w-[90vw] flex flex-col overflow-hidden h-[85vh]" onClick={(e) => e.stopPropagation()}>
                 <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-850">
                     <h3 className="font-bold text-slate-200 flex items-center gap-2"><Sparkles size={18} className="text-indigo-400"/> Configure Prompt Kind</h3>
                     <button onClick={() => setIsKindModalOpen(false)} className="text-slate-500 hover:text-white"><X size={20} /></button>
                 </div>
                 
-                <div className="p-6 overflow-y-auto flex-1 space-y-5">
+                <div className="p-6 overflow-y-auto flex-1 space-y-5 custom-scrollbar">
                     <div>
                         <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Name</label>
                         <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" value={editingKind.name} onChange={(e) => setEditingKind({...editingKind, name: e.target.value})} placeholder="e.g., Rewrite Scene"/>
@@ -1085,45 +1148,74 @@ export const Editor: React.FC<EditorProps> = ({
                         <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" value={editingKind.description || ''} onChange={(e) => setEditingKind({...editingKind, description: e.target.value})} placeholder="Short description"/>
                     </div>
 
-                    <div className="p-4 border border-slate-800 rounded-lg bg-slate-950/50">
-                        <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4">LLM Configuration Reference</h4>
+                    <div className="p-4 border border-slate-800 rounded-lg bg-slate-950/50 space-y-4">
+                        <h4 className="text-xs font-bold text-indigo-400 uppercase mb-2 flex items-center gap-2"><Sliders size={12}/> LLM Configuration</h4>
                         
-                        <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Provider</label>
-                        <select 
-                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 mb-3 capitalize"
-                            value={editingKind.provider}
-                            onChange={(e) => setEditingKind({ ...editingKind, provider: e.target.value as LLMProvider })}
-                        >
-                            <option value="google">Google Gemini</option>
-                            <option value="openrouter">OpenRouter</option>
-                            <option value="lmstudio">LM Studio</option>
-                        </select>
-
-                         <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Model Selection</label>
-                         <div className="relative">
-                            <select
-                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
-                                value={editingKind.model}
-                                onChange={(e) => setEditingKind({ ...editingKind, model: e.target.value })}
+                        <div>
+                            <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Provider</label>
+                            <select 
+                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
+                                value={editingKind.provider}
+                                onChange={(e) => setEditingKind({ ...editingKind, provider: e.target.value as LLMProvider })}
                             >
-                                <option value="" disabled>Select a model</option>
-                                {providerConfigs[editingKind.provider].availableModels?.map(m => (
-                                    <option key={m} value={m}>{m}</option>
-                                ))}
-                                {editingKind.model && !providerConfigs[editingKind.provider].availableModels?.includes(editingKind.model) && (
-                                     <option value={editingKind.model}>{editingKind.model} (Unlisted)</option>
-                                )}
+                                <option value="google">Google Gemini</option>
+                                <option value="openrouter">OpenRouter</option>
+                                <option value="lmstudio">LM Studio</option>
+                                <option value="venice">Venice AI</option>
                             </select>
-                            <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
+                        </div>
+
+                         <div>
+                             <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Model Selection</label>
+                             <div className="relative">
+                                <select
+                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
+                                    value={editingKind.model}
+                                    onChange={(e) => setEditingKind({ ...editingKind, model: e.target.value })}
+                                >
+                                    <option value="" disabled>Select a model</option>
+                                    {providerConfigs[editingKind.provider]?.availableModels?.map(m => (
+                                        <option key={m} value={m}>{m}</option>
+                                    ))}
+                                    {editingKind.model && !providerConfigs[editingKind.provider]?.availableModels?.includes(editingKind.model) && (
+                                         <option value={editingKind.model}>{editingKind.model} (Unlisted)</option>
+                                    )}
+                                </select>
+                                <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
+                             </div>
+                             <p className="text-[10px] text-slate-500 mt-1">
+                                 Models must be loaded in the <span className="font-bold">Settings</span> tab first.
+                             </p>
                          </div>
-                         <p className="text-[10px] text-slate-500 mt-2">
-                             Models must be loaded in the <span className="font-bold">Settings</span> tab first.
-                         </p>
+                         
+                         <div className="flex gap-4">
+                            <div className="flex-1">
+                                <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Max Tokens</label>
+                                <input 
+                                    type="number" 
+                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
+                                    value={editingKind.maxTokens || 2048}
+                                    onChange={(e) => setEditingKind({...editingKind, maxTokens: parseInt(e.target.value) || 0})}
+                                />
+                            </div>
+                            <div className="flex-1">
+                                <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Temperature ({editingKind.temperature ?? 0.7})</label>
+                                <input 
+                                    type="range" 
+                                    min="0" 
+                                    max="2" 
+                                    step="0.1"
+                                    className="w-full accent-indigo-500 mt-2"
+                                    value={editingKind.temperature ?? 0.7}
+                                    onChange={(e) => setEditingKind({...editingKind, temperature: parseFloat(e.target.value)})}
+                                />
+                            </div>
+                         </div>
                     </div>
 
                     <div>
                         <label className="block text-xs font-bold text-slate-400 uppercase mb-1">System Instruction</label>
-                         <p className="text-[10px] text-slate-500 mb-1">Variables: &#123;currentChapter&#125;, &#123;pov&#125;, &#123;chapterSummary:1&#125;, &#123;lastWords:500&#125;</p>
+                         <p className="text-[10px] text-slate-500 mb-1">Variables: &#123;currentChapter&#125;, &#123;pov&#125;, &#123;tense&#125;, &#123;chapterSummary:1&#125;, &#123;lastWords:500&#125;</p>
                         <textarea className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 font-mono leading-relaxed" value={editingKind.systemInstruction} onChange={(e) => setEditingKind({...editingKind, systemInstruction: e.target.value})}/>
                     </div>
                 </div>

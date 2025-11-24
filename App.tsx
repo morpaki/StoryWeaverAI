@@ -10,21 +10,24 @@ const STORAGE_KEY = 'storyweaver_data';
 const DEFAULT_GOOGLE_CONFIG: LLMConfig = { provider: 'google', apiKey: '', modelName: 'gemini-2.5-flash', availableModels: ['gemini-2.5-flash', 'gemini-2.5-pro'] };
 const DEFAULT_OPENROUTER_CONFIG: LLMConfig = { provider: 'openrouter', apiKey: '', modelName: 'google/gemini-2.0-flash-001', availableModels: [] };
 const DEFAULT_LMSTUDIO_CONFIG: LLMConfig = { provider: 'lmstudio', apiKey: '', modelName: 'local-model', baseUrl: 'http://localhost:1234/v1', availableModels: [] };
+const DEFAULT_VENICE_CONFIG: LLMConfig = { provider: 'venice', apiKey: '', modelName: 'llama-3.3-70b', availableModels: [] };
 
 const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
   google: DEFAULT_GOOGLE_CONFIG,
   openrouter: DEFAULT_OPENROUTER_CONFIG,
-  lmstudio: DEFAULT_LMSTUDIO_CONFIG
+  lmstudio: DEFAULT_LMSTUDIO_CONFIG,
+  venice: DEFAULT_VENICE_CONFIG
 };
 
 const DEFAULT_SYSTEM_INSTRUCTION = `You are a co-author. 
+Write in {pov} using {tense}.
 Style: Engaging, descriptive, and coherent with the existing text.
 Output: Only the story continuation. No meta-talk.`;
 
 const DEFAULT_BRAINSTORM_CONFIG: BrainstormConfig = {
     provider: 'google',
     model: 'gemini-2.5-flash',
-    systemInstruction: 'You are a helpful creative writing assistant. Help the user brainstorm ideas, solve plot holes, and develop characters. \n\nVariables available: {currentChapter}, {pov}, {chapterSummary:1}, {lastWords:500}'
+    systemInstruction: 'You are a helpful creative writing assistant. Help the user brainstorm ideas, solve plot holes, and develop characters. \n\nVariables available: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}'
 };
 
 const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
@@ -58,24 +61,32 @@ const App: React.FC = () => {
 
         // Prepare Data
         let promptKinds = dbPromptKinds as any[]; 
-        let providerConfigs = dbSettings?.providers || DEFAULT_PROVIDER_CONFIGS;
         let brainstormConfig = dbSettings?.brainstorm || DEFAULT_BRAINSTORM_CONFIG;
         let summaryConfig = dbSettings?.summary || DEFAULT_SUMMARY_CONFIG;
+        
+        // Merge loaded providers with defaults to ensure new providers (like venice) are present
+        let loadedProviders = dbSettings?.providers || DEFAULT_PROVIDER_CONFIGS;
+        // Start with defaults, overwrite with loaded values (preserving user keys/baseUrls), ensuring new keys exist
+        let providerConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...loadedProviders };
 
         // Migration: PromptKinds
         const migratedPromptKinds: PromptKind[] = promptKinds.map((pk: any) => {
-             if (pk.config) {
-                 // Old format detected
-                 return {
-                     id: pk.id,
-                     name: pk.name,
-                     description: pk.description,
-                     systemInstruction: pk.systemInstruction,
-                     provider: pk.config.provider || 'google',
-                     model: pk.config.modelName || 'gemini-2.5-flash'
-                 };
-             }
-             return pk as PromptKind;
+             // Handle old format
+             const base = pk.config ? {
+                 id: pk.id,
+                 name: pk.name,
+                 description: pk.description,
+                 systemInstruction: pk.systemInstruction,
+                 provider: pk.config.provider || 'google',
+                 model: pk.config.modelName || 'gemini-2.5-flash',
+             } : pk;
+             
+             // Ensure defaults for new fields
+             return {
+                 ...base,
+                 maxTokens: base.maxTokens || 2048,
+                 temperature: base.temperature ?? 0.7
+             } as PromptKind;
         });
 
         // Ensure default prompt kind
@@ -86,7 +97,9 @@ const App: React.FC = () => {
                 description: 'Standard story continuation based on context.',
                 systemInstruction: DEFAULT_SYSTEM_INSTRUCTION,
                 provider: 'google',
-                model: 'gemini-2.5-flash'
+                model: 'gemini-2.5-flash',
+                maxTokens: 2048,
+                temperature: 0.7
             };
             await db.savePromptKind(defaultKind);
             migratedPromptKinds.push(defaultKind);
@@ -110,10 +123,11 @@ const App: React.FC = () => {
              }
         }
 
-        // Migration: Ensure books have characters array and characters have image property, and POV
+        // Migration: Ensure books have characters array and characters have image property, and POV/Tense
         const migratedBooks = dbBooks.map(b => ({
             ...b,
-            pov: b.pov || '',
+            pov: b.pov || '3rd Person Omniscient',
+            tense: b.tense || 'Past Tense',
             characters: (b.characters || []).map((c: any) => ({
                 ...c,
                 image: c.image || null
@@ -121,7 +135,7 @@ const App: React.FC = () => {
         }));
 
         // Save migrated defaults if missing in DB (lazy migration)
-        if (!dbSettings?.summary) {
+        if (!dbSettings?.summary || !dbSettings?.providers) {
             await db.saveSettings(brainstormConfig, summaryConfig, providerConfigs);
         }
 
@@ -154,7 +168,8 @@ const App: React.FC = () => {
       codex: [],
       characters: [],
       lastModified: Date.now(),
-      pov: ''
+      pov: '3rd Person Omniscient',
+      tense: 'Past Tense'
     };
     db.saveBook(newBook).catch(console.error);
     setState(prev => ({ ...prev, books: [...prev.books, newBook] }));

@@ -33,6 +33,7 @@ export interface Book {
   characters: Character[];
   lastModified: number;
   pov: string; // Point of View configuration
+  tense: string; // Tense configuration
 }
 
 export interface Message {
@@ -40,7 +41,7 @@ export interface Message {
   content: string;
 }
 
-export type LLMProvider = 'google' | 'openrouter' | 'lmstudio';
+export type LLMProvider = 'google' | 'openrouter' | 'lmstudio' | 'venice';
 
 // Configuration for a specific provider (API keys, caching models)
 export interface LLMConfig {
@@ -49,6 +50,8 @@ export interface LLMConfig {
   modelName: string; // Default model fallback
   baseUrl?: string; // For local/openrouter
   availableModels?: string[]; // Cached list of models
+  maxTokens?: number;
+  temperature?: number;
 }
 
 // Configuration for the Brainstorming feature
@@ -74,6 +77,8 @@ export interface PromptKind {
   systemInstruction: string;
   provider: LLMProvider;
   model: string; 
+  maxTokens?: number;
+  temperature?: number;
 }
 
 export type ProviderConfigs = Record<LLMProvider, LLMConfig>;
