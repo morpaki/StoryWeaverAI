@@ -105,7 +105,7 @@ export class LLMService {
       }
     } catch (error: any) {
         console.error("Gemini API Error:", error);
-        return `Error generating content: ${error.message}`;
+        throw error;
     }
   }
 
@@ -143,14 +143,14 @@ export class LLMService {
 
         if (!response.ok) {
             const err = await response.json();
-            throw new Error(err.error?.message || "Unknown API error");
+            throw new Error(err.error?.message || `HTTP Error ${response.status}`);
         }
 
         const data = await response.json();
         return data.choices?.[0]?.message?.content || "";
     } catch (error: any) {
         console.error("Generic LLM Error:", error);
-        return `Error: ${error.message}`;
+        throw error;
     }
   }
 }

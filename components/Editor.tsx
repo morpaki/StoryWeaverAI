@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig } from '../types';
 import { 
   ArrowLeft, Plus, Save, Send, Sparkles, Settings, BookOpen, 
-  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders
+  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, Search
 } from 'lucide-react';
 import { LLMService } from '../services/llmService';
 
@@ -38,6 +38,84 @@ const TENSE_OPTIONS = [
     "Future Tense"
 ];
 
+// --- Custom Components ---
+
+const SearchableModelSelect = ({ value, options, onChange, placeholder, disabled }: {
+  value: string;
+  options: string[];
+  onChange: (val: string) => void;
+  placeholder?: string;
+  disabled?: boolean;
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Filter options based on search
+  const filtered = options.filter(opt => opt.toLowerCase().includes(search.toLowerCase()));
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <button 
+        onClick={() => !disabled && setIsOpen(!isOpen)}
+        className={`w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 text-left flex justify-between items-center ${disabled ? 'opacity-50' : ''}`}
+      >
+        <span className="truncate">{value || placeholder || "Select Model"}</span>
+        <ChevronDown size={14} className="text-slate-500 shrink-0 ml-2"/>
+      </button>
+
+      {isOpen && (
+        <div className="absolute top-full left-0 right-0 z-50 mt-1 bg-slate-900 border border-slate-700 rounded-lg shadow-xl flex flex-col max-h-60">
+           <div className="p-2 border-b border-slate-800 sticky top-0 bg-slate-900 z-10 rounded-t-lg">
+             <div className="flex items-center bg-slate-950 border border-slate-800 rounded px-2 gap-2">
+                <Search size={12} className="text-slate-500"/>
+                <input 
+                  autoFocus
+                  className="bg-transparent border-none outline-none text-sm py-1 w-full text-slate-200"
+                  placeholder="Search..."
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                />
+             </div>
+           </div>
+           <div className="overflow-y-auto flex-1 custom-scrollbar p-1">
+              {filtered.map(opt => (
+                  <button
+                    key={opt}
+                    onClick={() => { onChange(opt); setIsOpen(false); setSearch(''); }}
+                    className={`w-full text-left px-2 py-1.5 text-sm rounded hover:bg-slate-800 ${opt === value ? 'text-indigo-400 bg-indigo-900/20' : 'text-slate-300'}`}
+                  >
+                    {opt}
+                  </button>
+              ))}
+              {filtered.length === 0 && !search && (
+                  <div className="px-2 py-2 text-xs text-slate-500 text-center italic">No models available</div>
+              )}
+              {search && !filtered.includes(search) && (
+                  <button
+                    onClick={() => { onChange(search); setIsOpen(false); setSearch(''); }}
+                    className="w-full text-left px-2 py-1.5 text-sm rounded hover:bg-slate-800 text-indigo-300 italic border-t border-slate-800 mt-1"
+                  >
+                    Use custom: "{search}"
+                  </button>
+              )}
+           </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const Editor: React.FC<EditorProps> = ({
   book,
   onBack,
@@ -56,6 +134,7 @@ export const Editor: React.FC<EditorProps> = ({
   // Tabs state
   const [leftTab, setLeftTab] = useState<'chapters' | 'brainstorm' | 'characters'>('chapters');
   const [rightTab, setRightTab] = useState<'codex' | 'settings'>('codex');
+  const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(true);
 
   // Chat states
   const [brainstormMessages, setBrainstormMessages] = useState<Message[]>([]);
@@ -71,6 +150,9 @@ export const Editor: React.FC<EditorProps> = ({
 
   // Retry State
   const [lastGeneration, setLastGeneration] = useState<{ prompt: string; responseLength: number; kindId: string } | null>(null);
+
+  // Error State
+  const [errorState, setErrorState] = useState<{ short: string; full: string } | null>(null);
 
   // Codex management
   const [newCodexTitle, setNewCodexTitle] = useState('');
@@ -357,6 +439,12 @@ export const Editor: React.FC<EditorProps> = ({
       };
   };
 
+  const handleError = (error: any) => {
+      const msg = error instanceof Error ? error.message : "An unknown error occurred";
+      const full = error instanceof Error ? (error.stack || msg) : JSON.stringify(error, null, 2);
+      setErrorState({ short: msg, full: full });
+  };
+
   const generateStory = async (overridePrompt?: string, overrideContent?: string) => {
     const activePrompt = overridePrompt !== undefined ? overridePrompt : promptInput;
     const currentChapterContent = overrideContent !== undefined ? overrideContent : (activeChapter?.content || '');
@@ -371,6 +459,7 @@ export const Editor: React.FC<EditorProps> = ({
     }
 
     setIsGenerating(true);
+    setErrorState(null);
 
     // 1. Identify Codex Items
     const relevantCodex = book.codex.filter(item => 
@@ -491,7 +580,7 @@ export const Editor: React.FC<EditorProps> = ({
 
       setPromptInput('');
     } catch (error: any) {
-      alert(`Generation failed: ${error.message}`);
+      handleError(error);
     } finally {
       setIsGenerating(false);
     }
@@ -511,14 +600,14 @@ export const Editor: React.FC<EditorProps> = ({
   const handleFetchModelsForSettings = async () => {
       const config = providerConfigs[settingsSelectedProvider];
       setIsFetchingModels(true);
+      setErrorState(null);
       try {
         const models = await LLMService.listModels(config);
         const updatedConfig = { ...config, availableModels: models };
         onUpdateSettings(brainstormConfig, summaryConfig, { ...providerConfigs, [settingsSelectedProvider]: updatedConfig });
         alert(`Successfully loaded ${models.length} models for ${settingsSelectedProvider.toUpperCase()}`);
       } catch (e) {
-          console.error(e);
-          alert('Failed to fetch models. Check configuration.');
+          handleError(e);
       } finally {
           setIsFetchingModels(false);
       }
@@ -560,6 +649,7 @@ export const Editor: React.FC<EditorProps> = ({
     setBrainstormMessages(newHistory);
     setBrainstormInput('');
     setIsGenerating(true);
+    setErrorState(null);
 
     const config = getRuntimeConfig(brainstormConfig.provider, brainstormConfig.model);
     const parsedSystemInstruction = parseTemplate(brainstormConfig.systemInstruction, book, activeChapter);
@@ -577,7 +667,8 @@ export const Editor: React.FC<EditorProps> = ({
       
       setBrainstormMessages([...newHistory, { role: 'model', content: result }]);
     } catch (e) {
-       setBrainstormMessages([...newHistory, { role: 'model', content: "Error connecting to LLM." }]);
+       handleError(e);
+       // We do NOT add the error message to the chat history
     } finally {
       setIsGenerating(false);
     }
@@ -605,6 +696,7 @@ export const Editor: React.FC<EditorProps> = ({
     const finalPrompt = context ? `CONTEXT:\n${context}\n\nUSER QUESTION: ${userMsg.content}` : userMsg.content;
 
     setIsGenerating(true);
+    setErrorState(null);
     const config = getRuntimeConfig(brainstormConfig.provider, brainstormConfig.model);
     const parsedSystemInstruction = parseTemplate(brainstormConfig.systemInstruction, book, activeChapter);
 
@@ -617,7 +709,8 @@ export const Editor: React.FC<EditorProps> = ({
       );
       setBrainstormMessages([...historyForUI, { role: 'model', content: result }]);
     } catch (e) {
-       setBrainstormMessages([...historyForUI, { role: 'model', content: "Error retrying generation." }]);
+       handleError(e);
+       // Do not add error to history, just revert state effectively happened in 'setBrainstormMessages(historyForUI)'
     } finally {
       setIsGenerating(false);
     }
@@ -628,6 +721,7 @@ export const Editor: React.FC<EditorProps> = ({
     const chapter = book.chapters.find(c => c.id === summaryModalChapterId);
     if (!chapter || !chapter.content) return;
     setIsGeneratingSummary(true);
+    setErrorState(null);
     
     const config = getRuntimeConfig(summaryConfig.provider, summaryConfig.model);
     
@@ -643,7 +737,7 @@ export const Editor: React.FC<EditorProps> = ({
       );
       setSummaryEditText(result);
     } catch (e) {
-      setSummaryEditText("Error generating summary.");
+      handleError(e);
     } finally {
       setIsGeneratingSummary(false);
     }
@@ -676,8 +770,11 @@ export const Editor: React.FC<EditorProps> = ({
       {/* Header */}
       <div className="h-14 border-b border-slate-800 bg-slate-900 flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-4">
-          <button onClick={onBack} className="p-2 hover:bg-slate-800 rounded-full transition-colors">
+          <button onClick={onBack} className="p-2 hover:bg-slate-800 rounded-full transition-colors" title="Back to Library">
             <ArrowLeft size={20} />
+          </button>
+          <button onClick={() => setIsLeftPanelOpen(!isLeftPanelOpen)} className={`p-2 hover:bg-slate-800 rounded-full transition-colors ${!isLeftPanelOpen ? 'text-indigo-400' : 'text-slate-400'}`} title="Toggle Sidebar">
+             <PanelLeft size={20} />
           </button>
           <h2 className="font-bold text-lg">{book.title} <span className="text-slate-500 text-sm font-normal">/ Editor</span></h2>
         </div>
@@ -690,7 +787,7 @@ export const Editor: React.FC<EditorProps> = ({
       <div className="flex flex-1 overflow-hidden">
         
         {/* LEFT PANEL */}
-        <div className="w-80 border-r border-slate-800 flex flex-col bg-slate-925 shrink-0">
+        <div className={`flex flex-col bg-slate-925 shrink-0 transition-all duration-300 ease-in-out overflow-hidden ${isLeftPanelOpen ? 'w-80 border-r border-slate-800' : 'w-0 border-r-0'}`}>
           <div className="flex border-b border-slate-800">
             <button onClick={() => setLeftTab('chapters')} className={`flex-1 py-3 text-sm font-medium flex items-center justify-center gap-2 ${leftTab === 'chapters' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-900' : 'text-slate-400 hover:text-slate-200'}`} title="Chapters"><BookOpen size={16} /></button>
             <button onClick={() => setLeftTab('brainstorm')} className={`flex-1 py-3 text-sm font-medium flex items-center justify-center gap-2 ${leftTab === 'brainstorm' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-900' : 'text-slate-400 hover:text-slate-200'}`} title="Brainstorm"><MessageSquare size={16} /></button>
@@ -1021,22 +1118,12 @@ export const Editor: React.FC<EditorProps> = ({
 
                             <div>
                                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
-                                <div className="relative">
-                                    <select
-                                        className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
-                                        value={brainstormConfig.model}
-                                        onChange={(e) => onUpdateSettings({...brainstormConfig, model: e.target.value}, summaryConfig, providerConfigs)}
-                                    >
-                                        <option value="" disabled>Select Model</option>
-                                        {providerConfigs[brainstormConfig.provider]?.availableModels?.map(m => (
-                                            <option key={m} value={m}>{m}</option>
-                                        ))}
-                                         {brainstormConfig.model && !providerConfigs[brainstormConfig.provider]?.availableModels?.includes(brainstormConfig.model) && (
-                                            <option value={brainstormConfig.model}>{brainstormConfig.model} (Unlisted)</option>
-                                        )}
-                                    </select>
-                                    <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
-                                </div>
+                                <SearchableModelSelect 
+                                    value={brainstormConfig.model}
+                                    options={providerConfigs[brainstormConfig.provider]?.availableModels || []}
+                                    onChange={(val) => onUpdateSettings({...brainstormConfig, model: val}, summaryConfig, providerConfigs)}
+                                    placeholder="Select Model"
+                                />
                             </div>
 
                             <div>
@@ -1072,22 +1159,12 @@ export const Editor: React.FC<EditorProps> = ({
 
                             <div>
                                 <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
-                                <div className="relative">
-                                    <select
-                                        className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
-                                        value={summaryConfig.model}
-                                        onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, model: e.target.value}, providerConfigs)}
-                                    >
-                                        <option value="" disabled>Select Model</option>
-                                        {providerConfigs[summaryConfig.provider]?.availableModels?.map(m => (
-                                            <option key={m} value={m}>{m}</option>
-                                        ))}
-                                         {summaryConfig.model && !providerConfigs[summaryConfig.provider]?.availableModels?.includes(summaryConfig.model) && (
-                                            <option value={summaryConfig.model}>{summaryConfig.model} (Unlisted)</option>
-                                        )}
-                                    </select>
-                                    <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
-                                </div>
+                                <SearchableModelSelect 
+                                    value={summaryConfig.model}
+                                    options={providerConfigs[summaryConfig.provider]?.availableModels || []}
+                                    onChange={(val) => onUpdateSettings(brainstormConfig, {...summaryConfig, model: val}, providerConfigs)}
+                                    placeholder="Select Model"
+                                />
                             </div>
 
                             <div>
@@ -1106,6 +1183,30 @@ export const Editor: React.FC<EditorProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Error Notification */}
+      {errorState && (
+        <div className="fixed bottom-4 right-4 z-50 w-96 bg-slate-900 border border-red-500/50 rounded-lg shadow-2xl overflow-hidden animate-in slide-in-from-bottom-4 fade-in duration-300">
+            <div className="bg-red-500/10 p-4 border-b border-red-500/20 flex justify-between items-start">
+                <div className="flex gap-3">
+                    <AlertCircle className="text-red-400 shrink-0" size={20} />
+                    <div>
+                        <h4 className="font-bold text-red-100 text-sm">Generation Failed</h4>
+                        <p className="text-xs text-red-200/80 mt-1">{errorState.short}</p>
+                    </div>
+                </div>
+                <button onClick={() => setErrorState(null)} className="text-red-400 hover:text-red-200"><X size={16}/></button>
+            </div>
+            <details className="group">
+                <summary className="px-4 py-2 text-xs text-slate-500 cursor-pointer hover:bg-slate-800/50 select-none flex items-center gap-2 list-none">
+                     <ChevronDown size={12} className="group-open:rotate-180 transition-transform" /> <span>View Full Error Details</span>
+                </summary>
+                <div className="p-4 bg-slate-950 text-xs font-mono text-red-300/70 whitespace-pre-wrap max-h-40 overflow-y-auto border-t border-slate-800">
+                    {errorState.full}
+                </div>
+            </details>
+        </div>
+      )}
 
       {/* Summary Modal */}
       {summaryModalChapterId && (
@@ -1167,22 +1268,12 @@ export const Editor: React.FC<EditorProps> = ({
 
                          <div>
                              <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Model Selection</label>
-                             <div className="relative">
-                                <select
-                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
-                                    value={editingKind.model}
-                                    onChange={(e) => setEditingKind({ ...editingKind, model: e.target.value })}
-                                >
-                                    <option value="" disabled>Select a model</option>
-                                    {providerConfigs[editingKind.provider]?.availableModels?.map(m => (
-                                        <option key={m} value={m}>{m}</option>
-                                    ))}
-                                    {editingKind.model && !providerConfigs[editingKind.provider]?.availableModels?.includes(editingKind.model) && (
-                                         <option value={editingKind.model}>{editingKind.model} (Unlisted)</option>
-                                    )}
-                                </select>
-                                <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
-                             </div>
+                             <SearchableModelSelect 
+                                value={editingKind.model}
+                                options={providerConfigs[editingKind.provider]?.availableModels || []}
+                                onChange={(val) => setEditingKind({ ...editingKind, model: val })}
+                                placeholder="Select a model"
+                             />
                              <p className="text-[10px] text-slate-500 mt-1">
                                  Models must be loaded in the <span className="font-bold">Settings</span> tab first.
                              </p>
