@@ -160,6 +160,7 @@ export const Editor: React.FC<EditorProps> = ({
   const [newCodexContent, setNewCodexContent] = useState('');
   const [newCodexIsGlobal, setNewCodexIsGlobal] = useState(false);
   const [editingCodexId, setEditingCodexId] = useState<string | null>(null);
+  const [isCodexModalOpen, setIsCodexModalOpen] = useState(false);
 
   // Character management
   const [charName, setCharName] = useState('');
@@ -168,6 +169,7 @@ export const Editor: React.FC<EditorProps> = ({
   const [charIsGlobal, setCharIsGlobal] = useState(false);
   const [charImage, setCharImage] = useState<string | null>(null);
   const [editingCharId, setEditingCharId] = useState<string | null>(null);
+  const [isCharacterModalOpen, setIsCharacterModalOpen] = useState(false);
 
   // Summary Modal State
   const [summaryModalChapterId, setSummaryModalChapterId] = useState<string | null>(null);
@@ -264,6 +266,24 @@ export const Editor: React.FC<EditorProps> = ({
 
   // --- Codex Helpers ---
 
+  const openNewCodexModal = () => {
+    setEditingCodexId(null);
+    setNewCodexTitle('');
+    setNewCodexTags('');
+    setNewCodexContent('');
+    setNewCodexIsGlobal(false);
+    setIsCodexModalOpen(true);
+  };
+
+  const openEditCodexModal = (item: CodexItem) => {
+    setEditingCodexId(item.id);
+    setNewCodexTitle(item.title);
+    setNewCodexTags(item.tags.join(', '));
+    setNewCodexContent(item.content);
+    setNewCodexIsGlobal(item.isGlobal || false);
+    setIsCodexModalOpen(true);
+  };
+
   const saveCodex = () => {
     if (!newCodexTitle || !newCodexContent) return;
     
@@ -292,15 +312,7 @@ export const Editor: React.FC<EditorProps> = ({
     setNewCodexTags('');
     setNewCodexContent('');
     setNewCodexIsGlobal(false);
-  };
-
-  const editCodex = (item: CodexItem) => {
-    setEditingCodexId(item.id);
-    setNewCodexTitle(item.title);
-    setNewCodexTags(item.tags.join(', '));
-    setNewCodexContent(item.content);
-    setNewCodexIsGlobal(item.isGlobal || false);
-    setRightTab('codex');
+    setIsCodexModalOpen(false);
   };
 
   const deleteCodex = (id: string) => {
@@ -309,6 +321,26 @@ export const Editor: React.FC<EditorProps> = ({
   };
 
   // --- Character Helpers ---
+
+  const openNewCharacterModal = () => {
+    setEditingCharId(null);
+    setCharName('');
+    setCharAliases('');
+    setCharDesc('');
+    setCharIsGlobal(false);
+    setCharImage(null);
+    setIsCharacterModalOpen(true);
+  };
+
+  const openEditCharacterModal = (char: Character) => {
+      setEditingCharId(char.id);
+      setCharName(char.name);
+      setCharAliases(char.aliases.join(', '));
+      setCharDesc(char.description);
+      setCharIsGlobal(char.isGlobal);
+      setCharImage(char.image || null);
+      setIsCharacterModalOpen(true);
+  };
 
   const saveCharacter = () => {
     if (!charName || !charDesc) return;
@@ -341,24 +373,7 @@ export const Editor: React.FC<EditorProps> = ({
     setCharDesc('');
     setCharIsGlobal(false);
     setCharImage(null);
-  };
-
-  const cancelEditCharacter = () => {
-      setEditingCharId(null);
-      setCharName('');
-      setCharAliases('');
-      setCharDesc('');
-      setCharIsGlobal(false);
-      setCharImage(null);
-  };
-
-  const editCharacter = (char: Character) => {
-      setEditingCharId(char.id);
-      setCharName(char.name);
-      setCharAliases(char.aliases.join(', '));
-      setCharDesc(char.description);
-      setCharIsGlobal(char.isGlobal);
-      setCharImage(char.image || null);
+    setIsCharacterModalOpen(false);
   };
 
   const deleteCharacter = (id: string) => {
@@ -542,11 +557,11 @@ export const Editor: React.FC<EditorProps> = ({
     }
 
     if (combinedContextItems.length > 0) {
-        contextBlocks.push(combinedContextItems.join('\n'));
+        contextBlocks.push(`IMPORTANT CONTEXT:\n${combinedContextItems.join('\n')}`);
     }
 
     if (contextBlocks.length > 0) {
-        systemInstruction += `\n\nIMPORTANT CONTEXT:\n${contextBlocks.join('\n\n')}`;
+        systemInstruction += `\n\n${contextBlocks.join('\n\n')}`;
     }
 
     // 4. Build Full Prompt
@@ -810,41 +825,14 @@ export const Editor: React.FC<EditorProps> = ({
             )}
 
             {leftTab === 'characters' && (
-                <div className="space-y-6">
-                     <div className="bg-slate-900 p-3 rounded-lg border border-slate-800">
-                        <h4 className="text-xs font-bold text-slate-400 uppercase mb-2">{editingCharId ? 'Edit Character' : 'New Character'}</h4>
-                        
-                        {/* Image Upload */}
-                        <div className="flex justify-center mb-3">
-                            <div className="relative w-20 h-20 rounded-full bg-slate-950 border-2 border-dashed border-slate-700 flex items-center justify-center overflow-hidden group cursor-pointer hover:border-indigo-500 transition-colors">
-                                {charImage ? (
-                                    <>
-                                        <img src={charImage} alt="Character" className="w-full h-full object-cover" />
-                                        <button onClick={(e) => { e.stopPropagation(); setCharImage(null); }} className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-red-400"><Trash2 size={16}/></button>
-                                    </>
-                                ) : (
-                                    <>
-                                        <ImageIcon size={20} className="text-slate-600 group-hover:text-indigo-400"/>
-                                        <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleCharImageUpload} />
-                                    </>
-                                )}
-                            </div>
-                        </div>
+                <div className="space-y-4">
+                     <button 
+                        onClick={openNewCharacterModal}
+                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-2 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors mb-2"
+                     >
+                         <Plus size={16} /> Add Character
+                     </button>
 
-                        <input className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 mb-2 text-sm outline-none focus:border-indigo-500" placeholder="Name (e.g. John Doe)" value={charName} onChange={(e) => setCharName(e.target.value)}/>
-                         <div className="flex items-center gap-2 mb-2">
-                            <input type="checkbox" id="char-global" checked={charIsGlobal} onChange={(e) => setCharIsGlobal(e.target.checked)} className="rounded border-slate-800 bg-slate-950 text-indigo-600 focus:ring-indigo-500"/>
-                            <label htmlFor="char-global" className="text-xs text-slate-400 select-none cursor-pointer flex items-center gap-1"><Globe size={12} /> Global</label>
-                        </div>
-                        <input className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 mb-2 text-sm outline-none focus:border-indigo-500" placeholder="Aliases (comma separated)" value={charAliases} onChange={(e) => setCharAliases(e.target.value)}/>
-                        <textarea className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 mb-2 text-sm h-20 resize-none outline-none focus:border-indigo-500" placeholder="Description sent to LLM..." value={charDesc} onChange={(e) => setCharDesc(e.target.value)}/>
-                        <div className="flex gap-2">
-                            <button onClick={saveCharacter} className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-1 rounded text-sm flex items-center justify-center gap-2"><Save size={14} /> {editingCharId ? 'Update' : 'Add'}</button>
-                            {editingCharId && (
-                                <button onClick={cancelEditCharacter} className="w-8 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded text-sm flex items-center justify-center transition-colors" title="Cancel Editing"><X size={14} /></button>
-                            )}
-                        </div>
-                    </div>
                     <div className="space-y-3">
                         {(book.characters || []).map(char => (
                             <div key={char.id} className="bg-slate-900 border border-slate-800 rounded-lg p-3 group hover:border-indigo-500/30 transition-colors flex gap-3">
@@ -860,7 +848,7 @@ export const Editor: React.FC<EditorProps> = ({
                                 <div className="flex-1 min-w-0">
                                     <div className="flex justify-between items-start mb-1">
                                          <span className="font-bold text-sm text-indigo-300 flex items-center gap-2 truncate">{char.name}{char.isGlobal && <span title="Global Character"><Globe size={12} className="text-green-400" /></span>}</span>
-                                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => editCharacter(char)} className="p-1 hover:text-white text-slate-500"><Edit2 size={12} /></button><button onClick={() => deleteCharacter(char.id)} className="p-1 hover:text-red-400 text-slate-500"><Trash2 size={12} /></button></div>
+                                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => openEditCharacterModal(char)} className="p-1 hover:text-white text-slate-500"><Edit2 size={12} /></button><button onClick={() => deleteCharacter(char.id)} className="p-1 hover:text-red-400 text-slate-500"><Trash2 size={12} /></button></div>
                                     </div>
                                     <div className="flex flex-wrap gap-1 mb-2">{char.aliases.map(t => (<span key={t} className="text-[10px] px-1.5 py-0.5 bg-slate-800 text-slate-400 rounded-full">{t}</span>))}</div>
                                     <p className="text-xs text-slate-400 line-clamp-2">{char.description}</p>
@@ -970,24 +958,20 @@ export const Editor: React.FC<EditorProps> = ({
 
           <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
             {rightTab === 'codex' ? (
-                <div className="space-y-6">
-                    <div className="bg-slate-900 p-3 rounded-lg border border-slate-800">
-                        <h4 className="text-xs font-bold text-slate-400 uppercase mb-2">{editingCodexId ? 'Edit Entry' : 'New Codex Entry'}</h4>
-                        <input className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 mb-2 text-sm outline-none focus:border-indigo-500" placeholder="Title" value={newCodexTitle} onChange={(e) => setNewCodexTitle(e.target.value)}/>
-                         <div className="flex items-center gap-2 mb-2">
-                            <input type="checkbox" id="codex-global" checked={newCodexIsGlobal} onChange={(e) => setNewCodexIsGlobal(e.target.checked)} className="rounded border-slate-800 bg-slate-950 text-indigo-600 focus:ring-indigo-500"/>
-                            <label htmlFor="codex-global" className="text-xs text-slate-400 select-none cursor-pointer flex items-center gap-1"><Globe size={12} /> Global</label>
-                        </div>
-                        <input className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 mb-2 text-sm outline-none focus:border-indigo-500" placeholder="Tags" value={newCodexTags} onChange={(e) => setNewCodexTags(e.target.value)}/>
-                        <textarea className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 mb-2 text-sm h-20 resize-none outline-none focus:border-indigo-500" placeholder="Content..." value={newCodexContent} onChange={(e) => setNewCodexContent(e.target.value)}/>
-                        <button onClick={saveCodex} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-1 rounded text-sm flex items-center justify-center gap-2"><Save size={14} /> {editingCodexId ? 'Update' : 'Add'}</button>
-                    </div>
+                <div className="space-y-4">
+                    <button 
+                        onClick={openNewCodexModal}
+                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-2 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors mb-2"
+                     >
+                         <Plus size={16} /> Add Codex Entry
+                     </button>
+
                     <div className="space-y-3">
                         {book.codex.map(item => (
                             <div key={item.id} className="bg-slate-900 border border-slate-800 rounded-lg p-3 group hover:border-indigo-500/30 transition-colors">
                                 <div className="flex justify-between items-start mb-1">
                                      <span className="font-bold text-sm text-indigo-300 flex items-center gap-2">{item.title}{item.isGlobal && <span title="Global Entry"><Globe size={12} className="text-green-400" /></span>}</span>
-                                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => editCodex(item)} className="p-1 hover:text-white text-slate-500"><Edit2 size={12} /></button><button onClick={() => deleteCodex(item.id)} className="p-1 hover:text-red-400 text-slate-500"><Trash2 size={12} /></button></div>
+                                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => openEditCodexModal(item)} className="p-1 hover:text-white text-slate-500"><Edit2 size={12} /></button><button onClick={() => deleteCodex(item.id)} className="p-1 hover:text-red-400 text-slate-500"><Trash2 size={12} /></button></div>
                                 </div>
                                 <div className="flex flex-wrap gap-1 mb-2">{item.tags.map(t => (<span key={t} className="text-[10px] px-1.5 py-0.5 bg-slate-800 text-slate-400 rounded-full">{t}</span>))}</div>
                                 <p className="text-xs text-slate-400 line-clamp-3">{item.content}</p>
@@ -1320,6 +1304,113 @@ export const Editor: React.FC<EditorProps> = ({
                 </div>
             </div>
         </div>
+       )}
+
+       {/* Codex Editor Modal */}
+       {isCodexModalOpen && (
+           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setIsCodexModalOpen(false)}>
+               <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[800px] max-w-[90vw] flex flex-col overflow-hidden max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+                    <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-850">
+                       <h3 className="font-bold text-slate-200 flex items-center gap-2"><BookOpen size={18} className="text-indigo-400"/> {editingCodexId ? 'Edit Codex Entry' : 'New Codex Entry'}</h3>
+                       <button onClick={() => setIsCodexModalOpen(false)} className="text-slate-500 hover:text-white"><X size={20} /></button>
+                   </div>
+                   <div className="p-6 flex-1 overflow-y-auto space-y-4">
+                       <div className="flex items-center gap-4">
+                           <div className="flex-1">
+                               <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Title</label>
+                               <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" placeholder="Entry Title" value={newCodexTitle} onChange={(e) => setNewCodexTitle(e.target.value)} autoFocus/>
+                           </div>
+                           <div className="flex items-center pt-5">
+                                <label className="flex items-center gap-2 cursor-pointer select-none">
+                                    <input type="checkbox" checked={newCodexIsGlobal} onChange={(e) => setNewCodexIsGlobal(e.target.checked)} className="rounded border-slate-800 bg-slate-950 text-indigo-600 focus:ring-indigo-500 w-4 h-4"/>
+                                    <span className="text-sm text-slate-300 flex items-center gap-1"><Globe size={14} /> Global Entry</span>
+                                </label>
+                           </div>
+                       </div>
+                       
+                       <div>
+                           <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Tags</label>
+                           <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" placeholder="comma, separated, tags" value={newCodexTags} onChange={(e) => setNewCodexTags(e.target.value)}/>
+                           <p className="text-[10px] text-slate-500 mt-1">If these tags appear in your prompt, this entry will be included in the context.</p>
+                       </div>
+
+                       <div className="flex-1 flex flex-col h-full min-h-[300px]">
+                           <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Content</label>
+                           <textarea className="flex-1 w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar" placeholder="Detailed information..." value={newCodexContent} onChange={(e) => setNewCodexContent(e.target.value)}/>
+                       </div>
+                   </div>
+                   <div className="p-4 border-t border-slate-800 flex justify-end gap-3 bg-slate-850">
+                        <button onClick={() => setIsCodexModalOpen(false)} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
+                        <button onClick={saveCodex} className="px-6 py-2 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500 shadow-lg shadow-indigo-500/20 transition-all flex items-center gap-2"><Save size={16}/> Save Entry</button>
+                   </div>
+               </div>
+           </div>
+       )}
+
+       {/* Character Editor Modal */}
+       {isCharacterModalOpen && (
+           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setIsCharacterModalOpen(false)}>
+               <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[800px] max-w-[90vw] flex flex-col overflow-hidden max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+                    <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-850">
+                       <h3 className="font-bold text-slate-200 flex items-center gap-2"><Users size={18} className="text-indigo-400"/> {editingCharId ? 'Edit Character' : 'New Character'}</h3>
+                       <button onClick={() => setIsCharacterModalOpen(false)} className="text-slate-500 hover:text-white"><X size={20} /></button>
+                   </div>
+                   <div className="p-6 flex-1 overflow-y-auto">
+                       <div className="flex gap-6 mb-6">
+                            {/* Image Upload Section */}
+                            <div className="w-40 flex-shrink-0">
+                                <label className="block text-xs font-bold text-slate-400 uppercase mb-2 text-center">Portrait</label>
+                                <div className="relative w-40 h-40 rounded-xl bg-slate-950 border-2 border-dashed border-slate-700 flex items-center justify-center overflow-hidden group cursor-pointer hover:border-indigo-500 transition-colors shadow-inner">
+                                    {charImage ? (
+                                        <>
+                                            <img src={charImage} alt="Character" className="w-full h-full object-cover" />
+                                            <button onClick={(e) => { e.stopPropagation(); setCharImage(null); }} className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-red-400"><Trash2 size={24}/></button>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <div className="flex flex-col items-center gap-2">
+                                                <ImageIcon size={32} className="text-slate-600 group-hover:text-indigo-400 transition-colors"/>
+                                                <span className="text-xs text-slate-600">Upload Image</span>
+                                            </div>
+                                            <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleCharImageUpload} />
+                                        </>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Info Section */}
+                            <div className="flex-1 space-y-4">
+                                <div className="flex gap-4">
+                                    <div className="flex-1">
+                                        <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Name</label>
+                                        <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" placeholder="Character Name" value={charName} onChange={(e) => setCharName(e.target.value)} autoFocus/>
+                                    </div>
+                                    <div className="flex items-center pt-5">
+                                        <label className="flex items-center gap-2 cursor-pointer select-none">
+                                            <input type="checkbox" checked={charIsGlobal} onChange={(e) => setCharIsGlobal(e.target.checked)} className="rounded border-slate-800 bg-slate-950 text-indigo-600 focus:ring-indigo-500 w-4 h-4"/>
+                                            <span className="text-sm text-slate-300 flex items-center gap-1"><Globe size={14} /> Global</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div>
+                                   <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Aliases</label>
+                                   <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" placeholder="comma, separated, names" value={charAliases} onChange={(e) => setCharAliases(e.target.value)}/>
+                                   <p className="text-[10px] text-slate-500 mt-1">Used to detect mentions in the text.</p>
+                                </div>
+                            </div>
+                       </div>
+                       
+                       <div className="flex flex-col h-[300px]">
+                           <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Description</label>
+                           <textarea className="flex-1 w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar" placeholder="Detailed physical description, personality, background..." value={charDesc} onChange={(e) => setCharDesc(e.target.value)}/>
+                       </div>
+                   </div>
+                   <div className="p-4 border-t border-slate-800 flex justify-end gap-3 bg-slate-850">
+                        <button onClick={() => setIsCharacterModalOpen(false)} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
+                        <button onClick={saveCharacter} className="px-6 py-2 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500 shadow-lg shadow-indigo-500/20 transition-all flex items-center gap-2"><Save size={16}/> Save Character</button>
+                   </div>
+               </div>
+           </div>
        )}
     </div>
   );
