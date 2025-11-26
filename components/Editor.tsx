@@ -399,7 +399,7 @@ export const Editor: React.FC<EditorProps> = ({
           id: crypto.randomUUID(),
           name: 'New Prompt Kind',
           description: '',
-          systemInstruction: "You are a co-author. Write in {pov} using {tense}. Style: Engaging, descriptive. Output: Only story continuation.",
+          systemInstruction: "You are a co-author. Write in {pov} using {tense}. Style: Engaging, descriptive. Output: Only story continuation. Respond with exactly one paragraph of 3–5 sentences. Do not use bullet points or lists.",
           provider: 'google',
           model: 'gemini-2.5-flash',
           maxTokens: 2048,

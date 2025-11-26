@@ -22,7 +22,7 @@ const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
 const DEFAULT_SYSTEM_INSTRUCTION = `You are a co-author. 
 Write in {pov} using {tense}.
 Style: Engaging, descriptive, and coherent with the existing text.
-Output: Only the story continuation. No meta-talk.`;
+Output: Only the story continuation. Respond with exactly one paragraph of 3–5 sentences. Do not use bullet points or lists. No meta-talk.`;
 
 const DEFAULT_BRAINSTORM_CONFIG: BrainstormConfig = {
     provider: 'google',
@@ -33,7 +33,7 @@ const DEFAULT_BRAINSTORM_CONFIG: BrainstormConfig = {
 const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
     provider: 'google',
     model: 'gemini-2.5-flash',
-    systemInstruction: 'Summarize the provided chapter content in 3-5 sentences. Focus on key plot points and character developments.'
+    systemInstruction: 'Summarize the provided chapter content. Respond with exactly one paragraph of 3–5 sentences. Do not use bullet points or lists. Focus on key plot points and character developments.'
 };
 
 const App: React.FC = () => {
