@@ -1,6 +1,7 @@
 
 
 
+
 export interface CodexItem {
   id: string;
   title: string;
@@ -61,21 +62,24 @@ export interface LLMConfig {
 export interface BrainstormConfig {
   provider: LLMProvider;
   model: string;
-  systemInstruction: string;
+  systemRole: string; // The Persona
+  instruction: string; // The Task/Template
 }
 
 // Configuration for Auto Summary
 export interface SummaryConfig {
   provider: LLMProvider;
   model: string;
-  systemInstruction: string;
+  systemRole: string;
+  instruction: string;
 }
 
 // Configuration for Story Suggestions
 export interface SuggestionConfig {
   provider: LLMProvider;
   model: string;
-  systemInstruction: string;
+  systemRole: string;
+  instruction: string;
   count: number;
 }
 
@@ -85,7 +89,8 @@ export interface PromptKind {
   id: string;
   name: string;
   description?: string;
-  systemInstruction: string;
+  systemRole: string;
+  instruction: string;
   provider: LLMProvider;
   model: string; 
   maxTokens?: number;

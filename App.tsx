@@ -1,4 +1,6 @@
 
+
+
 import React, { useState, useEffect } from 'react';
 import { AppState, Book, BrainstormConfig, LLMConfig, PromptKind, ProviderConfigs, SuggestionConfig, SummaryConfig } from './types';
 import { Library } from './components/Library';
@@ -19,35 +21,29 @@ const DEFAULT_PROVIDER_CONFIGS: ProviderConfigs = {
   venice: DEFAULT_VENICE_CONFIG
 };
 
-const DEFAULT_SYSTEM_INSTRUCTION = `You are a co-author. 
-Write in {pov} using {tense}.
-Style: Engaging, descriptive, and coherent with the existing text.
-Output: Only the story continuation. Respond with exactly one paragraph of 3–5 sentences. Do not use bullet points or lists. No meta-talk.`;
+// Default Prompt Kind Data
+const DEFAULT_PROMPT_SYSTEM_ROLE = "You are a co-author. Write in the style of the existing text. No meta-talk.";
+const DEFAULT_PROMPT_INSTRUCTION = "Write in {pov} using {tense}. Output exactly one paragraph of 3–5 sentences. Do not use bullet points.";
 
 const DEFAULT_BRAINSTORM_CONFIG: BrainstormConfig = {
     provider: 'google',
     model: 'gemini-2.5-flash',
-    systemInstruction: 'You are a helpful creative writing assistant. Help the user brainstorm ideas, solve plot holes, and develop characters. \n\nVariables available: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}'
+    systemRole: 'You are a helpful creative writing assistant. Help the user brainstorm ideas, solve plot holes, and develop characters.',
+    instruction: 'Variables available: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}'
 };
 
 const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
     provider: 'google',
     model: 'gemini-2.5-flash',
-    systemInstruction: 'Summarize the provided chapter content. Respond with exactly one paragraph of 3–5 sentences. Do not use bullet points or lists. Focus on key plot points and character developments.'
+    systemRole: 'You are an expert summarizer.',
+    instruction: 'Summarize the provided chapter content. Respond with exactly one paragraph of 3–5 sentences. Do not use bullet points or lists. Focus on key plot points and character developments.'
 };
 
 const DEFAULT_SUGGESTION_CONFIG: SuggestionConfig = {
     provider: 'google',
     model: 'gemini-2.5-flash',
     count: 5,
-    systemInstruction: `You are a creative writing assistant. Generate {count} distinct plot suggestions for the next scene based on the context.
-
-REQUIRED CHARACTERS (Must be included):
-{characters}
-
-ADDITIONAL KEYWORDS/ELEMENTS (Must be included):
-{keywords}
-
+    systemRole: `You are a creative writing assistant. You help generate plot ideas. 
 Return ONLY a valid JSON array matching this structure:
 [
   {
@@ -55,7 +51,14 @@ Return ONLY a valid JSON array matching this structure:
     "suggestionDescription": "Detailed description (max 5 sentences)."
   }
 ]
-Do not add markdown formatting or explanations outside the JSON.`
+Do not add markdown formatting or explanations outside the JSON.`,
+    instruction: `Generate {count} distinct plot suggestions for the next scene based on the context.
+
+REQUIRED CHARACTERS (Must be included):
+{characters}
+
+ADDITIONAL KEYWORDS/ELEMENTS (Must be included):
+{keywords}`
 };
 
 const App: React.FC = () => {
@@ -84,19 +87,48 @@ const App: React.FC = () => {
 
         // Prepare Data
         let promptKinds = dbPromptKinds as any[]; 
-        let brainstormConfig = dbSettings?.brainstorm || DEFAULT_BRAINSTORM_CONFIG;
-        let summaryConfig = dbSettings?.summary || DEFAULT_SUMMARY_CONFIG;
-        let suggestionConfig = dbSettings?.suggestion || DEFAULT_SUGGESTION_CONFIG;
         
-        // Merge loaded providers with defaults to ensure new providers (like venice) are present
+        // Settings with fallbacks
+        let brainstormConfig = (dbSettings?.brainstorm || DEFAULT_BRAINSTORM_CONFIG) as any;
+        let summaryConfig = (dbSettings?.summary || DEFAULT_SUMMARY_CONFIG) as any;
+        let suggestionConfig = (dbSettings?.suggestion || DEFAULT_SUGGESTION_CONFIG) as any;
+        
+        // Merge loaded providers with defaults
         let loadedProviders = dbSettings?.providers || DEFAULT_PROVIDER_CONFIGS;
-        // Start with defaults, overwrite with loaded values (preserving user keys/baseUrls), ensuring new keys exist
         let providerConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...loadedProviders };
+
+        // --- Migration Logic for Split Instructions ---
+
+        // Helper to migrate legacy single-field configs to new structure
+        const migrateConfig = (conf: any, defaultRole: string, defaultInst: string) => {
+            if (conf.systemInstruction !== undefined && conf.systemRole === undefined) {
+                return {
+                    ...conf,
+                    systemRole: defaultRole,
+                    instruction: conf.systemInstruction || defaultInst,
+                    systemInstruction: undefined // cleanup
+                };
+            }
+            return conf;
+        };
+
+        brainstormConfig = migrateConfig(brainstormConfig, DEFAULT_BRAINSTORM_CONFIG.systemRole, DEFAULT_BRAINSTORM_CONFIG.instruction);
+        summaryConfig = migrateConfig(summaryConfig, DEFAULT_SUMMARY_CONFIG.systemRole, DEFAULT_SUMMARY_CONFIG.instruction);
+        
+        // Special case for suggestion config to ensure templates are in user instruction
+        if (suggestionConfig.systemInstruction !== undefined && suggestionConfig.systemRole === undefined) {
+             suggestionConfig = {
+                 ...suggestionConfig,
+                 systemRole: DEFAULT_SUGGESTION_CONFIG.systemRole,
+                 instruction: DEFAULT_SUGGESTION_CONFIG.instruction, // Force default instruction to ensure {characters} exists
+                 systemInstruction: undefined
+             };
+        }
 
         // Migration: PromptKinds
         const migratedPromptKinds: PromptKind[] = promptKinds.map((pk: any) => {
-             // Handle old format
-             const base = pk.config ? {
+             // 1. Handle very old format (nested config)
+             let base = pk.config ? {
                  id: pk.id,
                  name: pk.name,
                  description: pk.description,
@@ -105,7 +137,17 @@ const App: React.FC = () => {
                  model: pk.config.modelName || 'gemini-2.5-flash',
              } : pk;
              
-             // Ensure defaults for new fields
+             // 2. Handle split instruction migration
+             if (base.systemInstruction !== undefined && base.systemRole === undefined) {
+                 base = {
+                     ...base,
+                     systemRole: DEFAULT_PROMPT_SYSTEM_ROLE,
+                     instruction: base.systemInstruction || DEFAULT_PROMPT_INSTRUCTION,
+                     systemInstruction: undefined
+                 };
+             }
+             
+             // 3. Ensure defaults for numeric fields
              return {
                  ...base,
                  maxTokens: base.maxTokens || 2048,
@@ -119,7 +161,8 @@ const App: React.FC = () => {
                 id: 'default-story-continuation',
                 name: 'Continue Story',
                 description: 'Standard story continuation based on context.',
-                systemInstruction: DEFAULT_SYSTEM_INSTRUCTION,
+                systemRole: DEFAULT_PROMPT_SYSTEM_ROLE,
+                instruction: DEFAULT_PROMPT_INSTRUCTION,
                 provider: 'google',
                 model: 'gemini-2.5-flash',
                 maxTokens: 2048,
@@ -127,37 +170,6 @@ const App: React.FC = () => {
             };
             await db.savePromptKind(defaultKind);
             migratedPromptKinds.push(defaultKind);
-        }
-
-        // Migration: Old "llmConfig" settings to "brainstormConfig"
-        if (dbSettings && !dbSettings.brainstorm && (dbSettings as any).active) {
-            const oldActive = (dbSettings as any).active;
-            brainstormConfig = {
-                provider: oldActive.provider || 'google',
-                model: oldActive.modelName || 'gemini-2.5-flash',
-                systemInstruction: DEFAULT_BRAINSTORM_CONFIG.systemInstruction
-            };
-            // Also ensure provider config is set from old active
-             if (!dbSettings?.providers) {
-                const p = oldActive.provider || 'google';
-                providerConfigs = {
-                    ...DEFAULT_PROVIDER_CONFIGS,
-                    [p]: { ...DEFAULT_PROVIDER_CONFIGS[p as keyof ProviderConfigs], ...oldActive }
-                };
-             }
-        }
-
-        // Migration: Update suggestion config system instruction if it's the old default (missing {characters})
-        // This ensures the new template variables are available for use
-        if (suggestionConfig.systemInstruction.indexOf('{characters}') === -1) {
-             // Only update if it looks like the standard default (to avoid overwriting user custom instructions unnecessarily, though here we prioritize functionality)
-             // We'll trust the default update is better if the old one didn't have the required tag.
-             if (suggestionConfig.systemInstruction.includes('Return ONLY a valid JSON array')) {
-                  suggestionConfig = {
-                      ...suggestionConfig,
-                      systemInstruction: DEFAULT_SUGGESTION_CONFIG.systemInstruction
-                  };
-             }
         }
 
         // Migration: Ensure books have characters array and characters have image property, and POV/Tense
@@ -171,9 +183,10 @@ const App: React.FC = () => {
             }))
         }));
 
-        // Save migrated defaults if missing in DB (lazy migration)
-        if (!dbSettings?.summary || !dbSettings?.providers || !dbSettings?.suggestion) {
-            await db.saveSettings(brainstormConfig, summaryConfig, suggestionConfig, providerConfigs);
+        // Save migrated defaults if modified
+        if (dbSettings) {
+             // Save back to DB to persist the split structure
+             await db.saveSettings(brainstormConfig, summaryConfig, suggestionConfig, providerConfigs);
         }
 
         setState(prev => ({

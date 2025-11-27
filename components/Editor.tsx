@@ -1,4 +1,6 @@
 
+
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig, SuggestionConfig } from '../types';
 import { 
@@ -421,7 +423,8 @@ export const Editor: React.FC<EditorProps> = ({
           id: crypto.randomUUID(),
           name: 'New Prompt Kind',
           description: '',
-          systemInstruction: "You are a co-author. Write in {pov} using {tense}. Style: Engaging, descriptive. Output: Only story continuation. Respond with exactly one paragraph of 3–5 sentences. Do not use bullet points or lists.",
+          systemRole: "You are a co-author. Write in the style of the story.",
+          instruction: "Write in {pov} using {tense}. Output exactly one paragraph of 3–5 sentences.",
           provider: 'google',
           model: 'gemini-2.5-flash',
           maxTokens: 2048,
@@ -510,39 +513,31 @@ export const Editor: React.FC<EditorProps> = ({
               contextParts.push(`CURRENT CHAPTER (Last ~1500 words):\n${slicedContent}`);
           }
 
-          // 3. Add to User Prompt Context as fallback (in case system instruction template is missing)
-          // We still include them here to be safe and robust.
-          if (selectedChars.length > 0) {
-              contextParts.push(`REQUIRED CHARACTERS (Must be included):\n${charDetailsText}`);
-          }
-          
-          if (suggestionKeywords.trim()) {
-              contextParts.push(`REQUIRED KEYWORDS/ELEMENTS (Must be included):\n${keywordsText}`);
-          }
-
-          const prompt = `
-INPUT CONTEXT:
-${contextParts.join('\n\n')}
-
-INSTRUCTION:
-Generate ${suggestionConfig.count || 5} distinct plot suggestions for the next scene based on the context provided.
-MANDATORY CONSTRAINT: You MUST include ALL the "REQUIRED CHARACTERS" and "REQUIRED KEYWORDS/ELEMENTS" listed above in EACH suggestion, though you are not limited to them.
-Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally from the "CURRENT CHAPTER".
-          `;
-          
-          // Inject variables into System Instruction Template
-          let instruction = suggestionConfig.systemInstruction
+          // Inject variables into User Instruction Template
+          let instruction = suggestionConfig.instruction
               .replace('{count}', (suggestionConfig.count || 5).toString())
               .replace('{characters}', charDetailsText)
               .replace('{keywords}', keywordsText);
               
           instruction = parseTemplate(instruction, book, activeChapter);
 
+          // Construct the full prompt
+          const fullPrompt = `
+CONTEXT:
+${contextParts.join('\n\n')}
+
+TASK:
+${instruction}
+`;
+          
+          // System Role is static persona
+          const systemRole = suggestionConfig.systemRole;
+
           const config = getRuntimeConfig(suggestionConfig.provider, suggestionConfig.model, { 
               responseMimeType: 'application/json' 
           });
 
-          const responseText = await LLMService.generateCompletion(prompt, instruction, config);
+          const responseText = await LLMService.generateCompletion(fullPrompt, systemRole, config);
 
           // Attempt Parsing JSON
           let parsedData = [];
@@ -667,18 +662,21 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
         }
     }
 
-    // 3. Build System Instruction with Template Parsing
-    let rawSystemInstruction = selectedKind.systemInstruction
+    // 3. Prepare Prompt Parts
+    // System Role (Persona)
+    const systemRole = selectedKind.systemRole;
+    
+    // User Instruction (Task) - Parse Templates
+    let userInstruction = selectedKind.instruction
         .replace('{Title}', book.title)
         .replace('{ChapterTitle}', activeChapter.title)
         .replace('{ChapterSummary}', activeChapter.summary);
     
-    // Apply Parsers
-    let systemInstruction = parseTemplate(rawSystemInstruction, book, activeChapter);
+    userInstruction = parseTemplate(userInstruction, book, activeChapter);
 
     const contextBlocks: string[] = [];
 
-    // Inject Story So Far (Previous Chapter Summaries)
+    // Inject Story So Far
     const sortedChapters = [...book.chapters].sort((a, b) => a.order - b.order);
     const previousChapters = sortedChapters.filter(c => c.order < activeChapter.order);
     const storySoFar = previousChapters
@@ -690,7 +688,7 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
         contextBlocks.push(`STORY SO FAR:\n${storySoFar}`);
     }
 
-    // Merge Codex and Characters into a unified context list
+    // Merge Codex and Characters
     const combinedContextItems: string[] = [];
 
     if (relevantCodex.length > 0) {
@@ -709,27 +707,30 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
         contextBlocks.push(`IMPORTANT CONTEXT:\n${combinedContextItems.join('\n')}`);
     }
 
-    if (contextBlocks.length > 0) {
-        systemInstruction += `\n\n${contextBlocks.join('\n\n')}`;
-    }
-
-    // 4. Build Full Prompt
+    // 4. Build Full Prompt (User Side)
     const fullPrompt = `
-    Existing Content (Last 1500 chars): 
-    "${currentChapterContent.slice(-1500)}"
-    
-    Instruction: ${activePrompt}`;
+${contextBlocks.join('\n\n')}
 
-    // 5. Construct Configuration on the fly
+Existing Content (Last 1500 chars): 
+"${currentChapterContent.slice(-1500)}"
+
+Instruction:
+${userInstruction}
+
+Input/Action:
+${activePrompt}`;
+
+    // 5. Construct Configuration
     const config = getRuntimeConfig(selectedKind.provider, selectedKind.model, {
         maxTokens: selectedKind.maxTokens || 2048,
         temperature: selectedKind.temperature ?? 0.7
     });
 
     try {
+      // Pass systemRole as the System Instruction param
       const result = await LLMService.generateCompletion(
           fullPrompt, 
-          systemInstruction, 
+          systemRole, 
           config
       );
       
@@ -746,7 +747,6 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
 
       // Auto-generate suggestions if enabled
       if (autoGenerateSuggestions) {
-        // Pass the new content so suggestions are generated based on the latest state
         handleGenerateSuggestions(newContent);
       }
 
@@ -813,9 +813,13 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
     if (!brainstormInput.trim()) return;
     
     const context = getBrainstormContext();
-    const finalPrompt = context ? `CONTEXT:\n${context}\n\nUSER QUESTION: ${brainstormInput}` : brainstormInput;
+    // Prep User Instruction (Template)
+    const userInstruction = parseTemplate(brainstormConfig.instruction, book, activeChapter);
+    
+    // Combine Context + Instruction + User Question
+    const finalPrompt = `${userInstruction}\n\n${context ? `CONTEXT:\n${context}\n\n` : ''}USER QUESTION: ${brainstormInput}`;
 
-    const userMsg: Message = { role: 'user', content: brainstormInput }; // Display user's question only
+    const userMsg: Message = { role: 'user', content: brainstormInput }; 
     const newHistory = [...brainstormMessages, userMsg];
     setBrainstormMessages(newHistory);
     setBrainstormInput('');
@@ -823,15 +827,14 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
     setErrorState(null);
 
     const config = getRuntimeConfig(brainstormConfig.provider, brainstormConfig.model);
-    const parsedSystemInstruction = parseTemplate(brainstormConfig.systemInstruction, book, activeChapter);
+    const systemRole = brainstormConfig.systemRole;
 
     try {
-      // We send a modified history for this turn, but we store the user's original short message in state
       const apiHistory = [...brainstormMessages, { role: 'user', content: finalPrompt }] as Message[];
 
       const result = await LLMService.generateCompletion(
           finalPrompt, // prompt argument
-          parsedSystemInstruction, 
+          systemRole, 
           config, 
           brainstormMessages 
       );
@@ -839,7 +842,6 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
       setBrainstormMessages([...newHistory, { role: 'model', content: result }]);
     } catch (e) {
        handleError(e);
-       // We do NOT add the error message to the chat history
     } finally {
       setIsGenerating(false);
     }
@@ -850,49 +852,42 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
     const lastMsg = brainstormMessages[brainstormMessages.length - 1];
     if (lastMsg.role !== 'model') return;
     
-    // Get the user message that prompted the last response
-    // History for UI is everything except the last model message
     const historyForUI = brainstormMessages.slice(0, -1);
     const userMsg = historyForUI[historyForUI.length - 1];
     
     if (!userMsg || userMsg.role !== 'user') return;
     
-    // History for API is everything before the user message (since user msg becomes prompt)
     const historyForAPI = historyForUI.slice(0, -1);
     
-    // Revert UI
     setBrainstormMessages(historyForUI);
 
     const context = getBrainstormContext();
-    const finalPrompt = context ? `CONTEXT:\n${context}\n\nUSER QUESTION: ${userMsg.content}` : userMsg.content;
+    const userInstruction = parseTemplate(brainstormConfig.instruction, book, activeChapter);
+    const finalPrompt = `${userInstruction}\n\n${context ? `CONTEXT:\n${context}\n\n` : ''}USER QUESTION: ${userMsg.content}`;
 
     setIsGenerating(true);
     setErrorState(null);
     const config = getRuntimeConfig(brainstormConfig.provider, brainstormConfig.model);
-    const parsedSystemInstruction = parseTemplate(brainstormConfig.systemInstruction, book, activeChapter);
+    const systemRole = brainstormConfig.systemRole;
 
     try {
       const result = await LLMService.generateCompletion(
           finalPrompt,
-          parsedSystemInstruction,
+          systemRole,
           config,
           historyForAPI
       );
       setBrainstormMessages([...historyForUI, { role: 'model', content: result }]);
     } catch (e) {
        handleError(e);
-       // Do not add error to history, just revert state effectively happened in 'setBrainstormMessages(historyForUI)'
     } finally {
       setIsGenerating(false);
     }
   };
 
   const handleApplySuggestion = (suggestion: GeneratedSuggestion) => {
-      // Use the existing story generation logic with the suggestion description as input
-      // This ensures we use the selected PromptKind settings
       generateStory(suggestion.suggestionDescription);
       
-      // Cleanup
       setGeneratedSuggestions([]);
       setSuggestionKeywords('');
       setSuggestionSelectedCharIds([]);
@@ -920,14 +915,15 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
     
     const config = getRuntimeConfig(summaryConfig.provider, summaryConfig.model);
     
-    const parsedInstruction = parseTemplate(summaryConfig.systemInstruction, book, chapter);
+    const parsedInstruction = parseTemplate(summaryConfig.instruction, book, chapter);
+    const systemRole = summaryConfig.systemRole;
 
     try {
-      const prompt = `Content to summarize:\n${chapter.content}`;
+      const prompt = `${parsedInstruction}\n\nContent to summarize:\n${chapter.content}`;
 
       const result = await LLMService.generateCompletion(
         prompt, 
-        parsedInstruction, 
+        systemRole, 
         config
       );
       setSummaryEditText(result);
@@ -1452,11 +1448,21 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
                                     </div>
 
                                     <div>
-                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Instruction</label>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Role (Persona)</label>
                                         <textarea 
-                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-64 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                            value={brainstormConfig.systemInstruction}
-                                            onChange={(e) => onUpdateSettings({...brainstormConfig, systemInstruction: e.target.value}, summaryConfig, suggestionConfig, providerConfigs)}
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                            value={brainstormConfig.systemRole}
+                                            onChange={(e) => onUpdateSettings({...brainstormConfig, systemRole: e.target.value}, summaryConfig, suggestionConfig, providerConfigs)}
+                                            placeholder="You are a creative writing assistant..."
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Instruction Template</label>
+                                        <textarea 
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                            value={brainstormConfig.instruction}
+                                            onChange={(e) => onUpdateSettings({...brainstormConfig, instruction: e.target.value}, summaryConfig, suggestionConfig, providerConfigs)}
                                             placeholder="Variables: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}"
                                         />
                                     </div>
@@ -1506,11 +1512,21 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
                                     </div>
 
                                     <div>
-                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Instruction</label>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Role (Persona & Format)</label>
                                         <textarea 
-                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-64 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                            value={suggestionConfig.systemInstruction}
-                                            onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, systemInstruction: e.target.value}, providerConfigs)}
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar font-mono text-xs"
+                                            value={suggestionConfig.systemRole}
+                                            onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, systemRole: e.target.value}, providerConfigs)}
+                                            placeholder="You are a story plotter. Return JSON array..."
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Instruction Template (Context & Task)</label>
+                                        <textarea 
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                            value={suggestionConfig.instruction}
+                                            onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, instruction: e.target.value}, providerConfigs)}
                                             placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}"
                                         />
                                     </div>
@@ -1549,11 +1565,21 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
                                     </div>
 
                                     <div>
-                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Instruction</label>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Role (Persona)</label>
                                         <textarea 
-                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-64 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                            value={summaryConfig.systemInstruction}
-                                            onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, systemInstruction: e.target.value}, suggestionConfig, providerConfigs)}
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                            value={summaryConfig.systemRole}
+                                            onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, systemRole: e.target.value}, suggestionConfig, providerConfigs)}
+                                            placeholder="You are an expert summarizer..."
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Instruction Template</label>
+                                        <textarea 
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                            value={summaryConfig.instruction}
+                                            onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, instruction: e.target.value}, suggestionConfig, providerConfigs)}
                                                 placeholder="Variables: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}"
                                         />
                                     </div>
@@ -1641,7 +1667,7 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
                                 <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Max Tokens</label>
                                 <input 
                                     type="number" 
-                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
+                                    className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
                                     value={editingKind.maxTokens || 2048}
                                     onChange={(e) => setEditingKind({...editingKind, maxTokens: parseInt(e.target.value) || 0})}
                                 />
@@ -1662,9 +1688,14 @@ Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally f
                     </div>
 
                     <div>
-                        <label className="block text-xs font-bold text-slate-400 uppercase mb-1">System Instruction</label>
+                        <label className="block text-xs font-bold text-slate-400 uppercase mb-1">System Role (Persona)</label>
+                        <textarea className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 font-sans leading-relaxed" value={editingKind.systemRole} onChange={(e) => setEditingKind({...editingKind, systemRole: e.target.value})}/>
+                    </div>
+
+                    <div>
+                        <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Instruction Template</label>
                          <p className="text-[10px] text-slate-500 mb-1">Variables: &#123;currentChapter&#125;, &#123;pov&#125;, &#123;tense&#125;, &#123;chapterSummary:1&#125;, &#123;lastWords:500&#125;</p>
-                        <textarea className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 font-mono leading-relaxed" value={editingKind.systemInstruction} onChange={(e) => setEditingKind({...editingKind, systemInstruction: e.target.value})}/>
+                        <textarea className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 font-mono leading-relaxed" value={editingKind.instruction} onChange={(e) => setEditingKind({...editingKind, instruction: e.target.value})}/>
                     </div>
                 </div>
 
