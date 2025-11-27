@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { AppState, Book, BrainstormConfig, LLMConfig, PromptKind, ProviderConfigs, SummaryConfig } from './types';
+import { AppState, Book, BrainstormConfig, LLMConfig, PromptKind, ProviderConfigs, SuggestionConfig, SummaryConfig } from './types';
 import { Library } from './components/Library';
 import { Editor } from './components/Editor';
 import { db } from './services/db';
@@ -36,6 +36,28 @@ const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
     systemInstruction: 'Summarize the provided chapter content. Respond with exactly one paragraph of 3–5 sentences. Do not use bullet points or lists. Focus on key plot points and character developments.'
 };
 
+const DEFAULT_SUGGESTION_CONFIG: SuggestionConfig = {
+    provider: 'google',
+    model: 'gemini-2.5-flash',
+    count: 5,
+    systemInstruction: `You are a creative writing assistant. Generate {count} distinct plot suggestions for the next scene based on the context.
+
+REQUIRED CHARACTERS (Must be included):
+{characters}
+
+ADDITIONAL KEYWORDS/ELEMENTS (Must be included):
+{keywords}
+
+Return ONLY a valid JSON array matching this structure:
+[
+  {
+    "suggestionSummary": "One sentence summary.",
+    "suggestionDescription": "Detailed description (max 5 sentences)."
+  }
+]
+Do not add markdown formatting or explanations outside the JSON.`
+};
+
 const App: React.FC = () => {
   // --- State Initialization ---
   const [state, setState] = useState<AppState>({
@@ -45,6 +67,7 @@ const App: React.FC = () => {
     books: [],
     brainstormConfig: DEFAULT_BRAINSTORM_CONFIG,
     summaryConfig: DEFAULT_SUMMARY_CONFIG,
+    suggestionConfig: DEFAULT_SUGGESTION_CONFIG,
     providerConfigs: DEFAULT_PROVIDER_CONFIGS,
     promptKinds: []
   });
@@ -63,6 +86,7 @@ const App: React.FC = () => {
         let promptKinds = dbPromptKinds as any[]; 
         let brainstormConfig = dbSettings?.brainstorm || DEFAULT_BRAINSTORM_CONFIG;
         let summaryConfig = dbSettings?.summary || DEFAULT_SUMMARY_CONFIG;
+        let suggestionConfig = dbSettings?.suggestion || DEFAULT_SUGGESTION_CONFIG;
         
         // Merge loaded providers with defaults to ensure new providers (like venice) are present
         let loadedProviders = dbSettings?.providers || DEFAULT_PROVIDER_CONFIGS;
@@ -123,6 +147,19 @@ const App: React.FC = () => {
              }
         }
 
+        // Migration: Update suggestion config system instruction if it's the old default (missing {characters})
+        // This ensures the new template variables are available for use
+        if (suggestionConfig.systemInstruction.indexOf('{characters}') === -1) {
+             // Only update if it looks like the standard default (to avoid overwriting user custom instructions unnecessarily, though here we prioritize functionality)
+             // We'll trust the default update is better if the old one didn't have the required tag.
+             if (suggestionConfig.systemInstruction.includes('Return ONLY a valid JSON array')) {
+                  suggestionConfig = {
+                      ...suggestionConfig,
+                      systemInstruction: DEFAULT_SUGGESTION_CONFIG.systemInstruction
+                  };
+             }
+        }
+
         // Migration: Ensure books have characters array and characters have image property, and POV/Tense
         const migratedBooks = dbBooks.map(b => ({
             ...b,
@@ -135,8 +172,8 @@ const App: React.FC = () => {
         }));
 
         // Save migrated defaults if missing in DB (lazy migration)
-        if (!dbSettings?.summary || !dbSettings?.providers) {
-            await db.saveSettings(brainstormConfig, summaryConfig, providerConfigs);
+        if (!dbSettings?.summary || !dbSettings?.providers || !dbSettings?.suggestion) {
+            await db.saveSettings(brainstormConfig, summaryConfig, suggestionConfig, providerConfigs);
         }
 
         setState(prev => ({
@@ -144,6 +181,7 @@ const App: React.FC = () => {
             books: migratedBooks,
             brainstormConfig: brainstormConfig,
             summaryConfig: summaryConfig,
+            suggestionConfig: suggestionConfig,
             providerConfigs: providerConfigs,
             promptKinds: migratedPromptKinds
         }));
@@ -207,9 +245,9 @@ const App: React.FC = () => {
     setState(prev => ({ ...prev, activeBookId: null, view: 'library' }));
   };
 
-  const updateSettings = (brainstormConfig: BrainstormConfig, summaryConfig: SummaryConfig, providerConfigs: ProviderConfigs) => {
-    db.saveSettings(brainstormConfig, summaryConfig, providerConfigs).catch(console.error);
-    setState(prev => ({ ...prev, brainstormConfig, summaryConfig, providerConfigs }));
+  const updateSettings = (brainstormConfig: BrainstormConfig, summaryConfig: SummaryConfig, suggestionConfig: SuggestionConfig, providerConfigs: ProviderConfigs) => {
+    db.saveSettings(brainstormConfig, summaryConfig, suggestionConfig, providerConfigs).catch(console.error);
+    setState(prev => ({ ...prev, brainstormConfig, summaryConfig, suggestionConfig, providerConfigs }));
   };
 
   const managePromptKinds = {
@@ -241,6 +279,7 @@ const App: React.FC = () => {
           onUpdateBook={updateBook}
           brainstormConfig={state.brainstormConfig}
           summaryConfig={state.summaryConfig}
+          suggestionConfig={state.suggestionConfig}
           providerConfigs={state.providerConfigs}
           onUpdateSettings={updateSettings}
           promptKinds={state.promptKinds}

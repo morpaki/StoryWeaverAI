@@ -1,4 +1,6 @@
 
+
+
 export interface CodexItem {
   id: string;
   title: string;
@@ -52,6 +54,7 @@ export interface LLMConfig {
   availableModels?: string[]; // Cached list of models
   maxTokens?: number;
   temperature?: number;
+  responseMimeType?: string;
 }
 
 // Configuration for the Brainstorming feature
@@ -66,6 +69,14 @@ export interface SummaryConfig {
   provider: LLMProvider;
   model: string;
   systemInstruction: string;
+}
+
+// Configuration for Story Suggestions
+export interface SuggestionConfig {
+  provider: LLMProvider;
+  model: string;
+  systemInstruction: string;
+  count: number;
 }
 
 export type BrainstormContextType = 'none' | 'current_chapter' | 'all_summaries' | 'selected_summaries';
@@ -94,6 +105,9 @@ export interface AppState {
   
   // Active settings for Summaries
   summaryConfig: SummaryConfig;
+
+  // Active settings for Suggestions
+  suggestionConfig: SuggestionConfig;
 
   // Global repository of settings per provider
   providerConfigs: ProviderConfigs;

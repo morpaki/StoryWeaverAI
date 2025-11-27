@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig } from '../types';
+import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig, SuggestionConfig } from '../types';
 import { 
   ArrowLeft, Plus, Save, Send, Sparkles, Settings, BookOpen, 
-  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, Search
+  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, PanelRight, Search, Lightbulb, Check, ChevronUp
 } from 'lucide-react';
 import { LLMService } from '../services/llmService';
 
@@ -14,8 +14,9 @@ interface EditorProps {
   
   brainstormConfig: BrainstormConfig;
   summaryConfig: SummaryConfig;
+  suggestionConfig: SuggestionConfig;
   providerConfigs: ProviderConfigs;
-  onUpdateSettings: (brainstorm: BrainstormConfig, summary: SummaryConfig, providers: ProviderConfigs) => void;
+  onUpdateSettings: (brainstorm: BrainstormConfig, summary: SummaryConfig, suggestion: SuggestionConfig, providers: ProviderConfigs) => void;
 
   promptKinds: PromptKind[];
   onManagePromptKinds: {
@@ -37,6 +38,14 @@ const TENSE_OPTIONS = [
     "Present Tense",
     "Future Tense"
 ];
+
+interface GeneratedSuggestion {
+    id: string;
+    suggestionSummary: string;
+    suggestionDescription: string;
+    characters: Character[]; // Detected or selected characters
+    isExpanded: boolean;
+}
 
 // --- Custom Components ---
 
@@ -122,6 +131,7 @@ export const Editor: React.FC<EditorProps> = ({
   onUpdateBook,
   brainstormConfig,
   summaryConfig,
+  suggestionConfig,
   providerConfigs,
   onUpdateSettings,
   promptKinds,
@@ -132,9 +142,14 @@ export const Editor: React.FC<EditorProps> = ({
   );
   
   // Tabs state
-  const [leftTab, setLeftTab] = useState<'chapters' | 'brainstorm' | 'characters'>('chapters');
-  const [rightTab, setRightTab] = useState<'codex' | 'settings'>('codex');
+  const [leftTab, setLeftTab] = useState<'chapters' | 'brainstorm' | 'suggestions'>('chapters');
+  const [rightTab, setRightTab] = useState<'characters' | 'codex'>('characters');
   const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(true);
+  const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
+
+  // Settings Modal State
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<'general' | 'providers' | 'brainstorm' | 'suggestions' | 'summary'>('general');
 
   // Chat states
   const [brainstormMessages, setBrainstormMessages] = useState<Message[]>([]);
@@ -143,6 +158,13 @@ export const Editor: React.FC<EditorProps> = ({
   const [brainstormSelectedChapters, setBrainstormSelectedChapters] = useState<string[]>([]);
   const [isContextSelectorOpen, setIsContextSelectorOpen] = useState(false);
   
+  // Suggestion States
+  const [generatedSuggestions, setGeneratedSuggestions] = useState<GeneratedSuggestion[]>([]);
+  const [suggestionKeywords, setSuggestionKeywords] = useState('');
+  const [suggestionSelectedCharIds, setSuggestionSelectedCharIds] = useState<string[]>([]);
+  const [isGeneratingSuggestions, setIsGeneratingSuggestions] = useState(false);
+  const [autoGenerateSuggestions, setAutoGenerateSuggestions] = useState(false);
+
   // Prompt State
   const [promptInput, setPromptInput] = useState('');
   const [selectedKindId, setSelectedKindId] = useState<string>(promptKinds[0]?.id || '');
@@ -443,6 +465,133 @@ export const Editor: React.FC<EditorProps> = ({
       }
   };
 
+  // --- Suggestion Logic ---
+  
+  const handleGenerateSuggestions = async (overrideContent?: string) => {
+      setGeneratedSuggestions([]); // Always clear suggestions before generation
+      setIsGeneratingSuggestions(true);
+      setErrorState(null);
+      
+      try {
+          // Prepare Characters & Keywords text for template injection
+          const selectedChars = (book.characters || []).filter(c => suggestionSelectedCharIds.includes(c.id));
+          
+          const charDetailsText = selectedChars.length > 0 
+              ? selectedChars.map(c => `Name: ${c.name}\nDescription: ${c.description}`).join('\n\n')
+              : "No specific characters required.";
+              
+          const keywordsText = suggestionKeywords.trim() ? suggestionKeywords : "No specific keywords provided.";
+
+          // Prepare Context for Prompt
+          const contextParts: string[] = [];
+
+          // 1. Story So Far (Previous Chapter Summaries)
+          const sortedChapters = [...book.chapters].sort((a, b) => a.order - b.order);
+          const previousChapters = sortedChapters.filter(c => activeChapter && c.order < activeChapter.order);
+          if (previousChapters.length > 0) {
+             const summaries = previousChapters
+                .filter(c => c.summary && c.summary.trim())
+                .map(c => `Chapter: ${c.title}\nSummary: ${c.summary}`)
+                .join('\n\n');
+             if (summaries) contextParts.push(`STORY SO FAR:\n${summaries}`);
+          }
+
+          // 2. Current Chapter Content (Last ~1500 words / ~9000 chars)
+          // Use overrideContent if provided, otherwise fallback to activeChapter.content
+          let contentToUse = overrideContent;
+          if (contentToUse === undefined && activeChapter) {
+              contentToUse = activeChapter.content;
+          }
+          
+          if (contentToUse) {
+              const content = contentToUse;
+              const sliceLength = 9000;
+              const slicedContent = content.length > sliceLength ? "..." + content.slice(-sliceLength) : content;
+              contextParts.push(`CURRENT CHAPTER (Last ~1500 words):\n${slicedContent}`);
+          }
+
+          // 3. Add to User Prompt Context as fallback (in case system instruction template is missing)
+          // We still include them here to be safe and robust.
+          if (selectedChars.length > 0) {
+              contextParts.push(`REQUIRED CHARACTERS (Must be included):\n${charDetailsText}`);
+          }
+          
+          if (suggestionKeywords.trim()) {
+              contextParts.push(`REQUIRED KEYWORDS/ELEMENTS (Must be included):\n${keywordsText}`);
+          }
+
+          const prompt = `
+INPUT CONTEXT:
+${contextParts.join('\n\n')}
+
+INSTRUCTION:
+Generate ${suggestionConfig.count || 5} distinct plot suggestions for the next scene based on the context provided.
+MANDATORY CONSTRAINT: You MUST include ALL the "REQUIRED CHARACTERS" and "REQUIRED KEYWORDS/ELEMENTS" listed above in EACH suggestion, though you are not limited to them.
+Ensure suggestions are coherent with the "STORY SO FAR" and continue naturally from the "CURRENT CHAPTER".
+          `;
+          
+          // Inject variables into System Instruction Template
+          let instruction = suggestionConfig.systemInstruction
+              .replace('{count}', (suggestionConfig.count || 5).toString())
+              .replace('{characters}', charDetailsText)
+              .replace('{keywords}', keywordsText);
+              
+          instruction = parseTemplate(instruction, book, activeChapter);
+
+          const config = getRuntimeConfig(suggestionConfig.provider, suggestionConfig.model, { 
+              responseMimeType: 'application/json' 
+          });
+
+          const responseText = await LLMService.generateCompletion(prompt, instruction, config);
+
+          // Attempt Parsing JSON
+          let parsedData = [];
+          try {
+              // Extract JSON array if embedded in Markdown
+              const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+              const jsonStr = jsonMatch ? jsonMatch[0] : responseText;
+              parsedData = JSON.parse(jsonStr);
+          } catch (e) {
+              console.error("JSON Parsing failed", e);
+              throw new Error("Failed to parse suggestions from LLM response.");
+          }
+
+          if (!Array.isArray(parsedData)) throw new Error("LLM response was not an array.");
+
+          // Process Suggestions to auto-detect characters
+          const finalSuggestions: GeneratedSuggestion[] = parsedData.map((s: any) => {
+              const textToCheck = `${s.suggestionSummary} ${s.suggestionDescription}`;
+              
+              // Start with manually selected characters
+              const detectedChars = new Map<string, Character>();
+              selectedChars.forEach(c => detectedChars.set(c.id, c));
+              
+              // Scan for other existing characters in book
+              (book.characters || []).forEach(char => {
+                  if (textToCheck.toLowerCase().includes(char.name.toLowerCase()) || 
+                      char.aliases.some(a => textToCheck.toLowerCase().includes(a.toLowerCase()))) {
+                      detectedChars.set(char.id, char);
+                  }
+              });
+
+              return {
+                  id: crypto.randomUUID(),
+                  suggestionSummary: s.suggestionSummary,
+                  suggestionDescription: s.suggestionDescription,
+                  characters: Array.from(detectedChars.values()),
+                  isExpanded: false
+              };
+          });
+
+          setGeneratedSuggestions(finalSuggestions);
+
+      } catch (e) {
+          handleError(e);
+      } finally {
+          setIsGeneratingSuggestions(false);
+      }
+  };
+
   // --- LLM Operations ---
 
   const getRuntimeConfig = (provider: LLMProvider, modelName: string, overrides?: Partial<LLMConfig>): LLMConfig => {
@@ -594,6 +743,13 @@ export const Editor: React.FC<EditorProps> = ({
       });
 
       setPromptInput('');
+
+      // Auto-generate suggestions if enabled
+      if (autoGenerateSuggestions) {
+        // Pass the new content so suggestions are generated based on the latest state
+        handleGenerateSuggestions(newContent);
+      }
+
     } catch (error: any) {
       handleError(error);
     } finally {
@@ -619,7 +775,7 @@ export const Editor: React.FC<EditorProps> = ({
       try {
         const models = await LLMService.listModels(config);
         const updatedConfig = { ...config, availableModels: models };
-        onUpdateSettings(brainstormConfig, summaryConfig, { ...providerConfigs, [settingsSelectedProvider]: updatedConfig });
+        onUpdateSettings(brainstormConfig, summaryConfig, suggestionConfig, { ...providerConfigs, [settingsSelectedProvider]: updatedConfig });
         alert(`Successfully loaded ${models.length} models for ${settingsSelectedProvider.toUpperCase()}`);
       } catch (e) {
           handleError(e);
@@ -631,7 +787,7 @@ export const Editor: React.FC<EditorProps> = ({
   const updateProviderConfig = (provider: LLMProvider, updates: Partial<LLMConfig>) => {
       const current = providerConfigs[provider];
       const updated = { ...current, ...updates };
-      onUpdateSettings(brainstormConfig, summaryConfig, { ...providerConfigs, [provider]: updated });
+      onUpdateSettings(brainstormConfig, summaryConfig, suggestionConfig, { ...providerConfigs, [provider]: updated });
   };
 
   const getBrainstormContext = (): string => {
@@ -731,6 +887,30 @@ export const Editor: React.FC<EditorProps> = ({
     }
   };
 
+  const handleApplySuggestion = (suggestion: GeneratedSuggestion) => {
+      // Use the existing story generation logic with the suggestion description as input
+      // This ensures we use the selected PromptKind settings
+      generateStory(suggestion.suggestionDescription);
+      
+      // Cleanup
+      setGeneratedSuggestions([]);
+      setSuggestionKeywords('');
+      setSuggestionSelectedCharIds([]);
+  };
+
+  const toggleSuggestionExpand = (id: string) => {
+      setGeneratedSuggestions(prev => prev.map(s => 
+          s.id === id ? { ...s, isExpanded: !s.isExpanded } : s
+      ));
+  };
+
+  const toggleSuggestionCharSelect = (id: string) => {
+      setSuggestionSelectedCharIds(prev => 
+          prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+      );
+  };
+
+
   // Summary generation
   const handleGenerateSummaryInModal = async () => {
     const chapter = book.chapters.find(c => c.id === summaryModalChapterId);
@@ -793,8 +973,16 @@ export const Editor: React.FC<EditorProps> = ({
           </button>
           <h2 className="font-bold text-lg">{book.title} <span className="text-slate-500 text-sm font-normal">/ Editor</span></h2>
         </div>
-        <div className="text-xs text-slate-500 flex items-center gap-2">
-            Brainstorming: <span className="text-indigo-400 font-semibold uppercase">{brainstormConfig.provider}</span>
+        <div className="flex items-center gap-4">
+            <div className="text-xs text-slate-500 hidden sm:flex items-center gap-2">
+                Brainstorming: <span className="text-indigo-400 font-semibold uppercase">{brainstormConfig.provider}</span>
+            </div>
+            <button onClick={() => setIsSettingsModalOpen(true)} className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-400 hover:text-white" title="Settings">
+                <Settings size={20} />
+            </button>
+            <button onClick={() => setIsRightPanelOpen(!isRightPanelOpen)} className={`p-2 hover:bg-slate-800 rounded-full transition-colors ${!isRightPanelOpen ? 'text-indigo-400' : 'text-slate-400'}`} title="Toggle Right Sidebar">
+               <PanelRight size={20} />
+            </button>
         </div>
       </div>
 
@@ -802,11 +990,11 @@ export const Editor: React.FC<EditorProps> = ({
       <div className="flex flex-1 overflow-hidden">
         
         {/* LEFT PANEL */}
-        <div className={`flex flex-col bg-slate-925 shrink-0 transition-all duration-300 ease-in-out overflow-hidden ${isLeftPanelOpen ? 'w-80 border-r border-slate-800' : 'w-0 border-r-0'}`}>
+        <div className={`flex flex-col bg-slate-925 shrink-0 transition-all duration-300 ease-in-out overflow-hidden ${isLeftPanelOpen ? 'w-96 border-r border-slate-800' : 'w-0 border-r-0'}`}>
           <div className="flex border-b border-slate-800">
             <button onClick={() => setLeftTab('chapters')} className={`flex-1 py-3 text-sm font-medium flex items-center justify-center gap-2 ${leftTab === 'chapters' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-900' : 'text-slate-400 hover:text-slate-200'}`} title="Chapters"><BookOpen size={16} /></button>
             <button onClick={() => setLeftTab('brainstorm')} className={`flex-1 py-3 text-sm font-medium flex items-center justify-center gap-2 ${leftTab === 'brainstorm' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-900' : 'text-slate-400 hover:text-slate-200'}`} title="Brainstorm"><MessageSquare size={16} /></button>
-            <button onClick={() => setLeftTab('characters')} className={`flex-1 py-3 text-sm font-medium flex items-center justify-center gap-2 ${leftTab === 'characters' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-900' : 'text-slate-400 hover:text-slate-200'}`} title="Characters"><Users size={16} /></button>
+            <button onClick={() => setLeftTab('suggestions')} className={`flex-1 py-3 text-sm font-medium flex items-center justify-center gap-2 ${leftTab === 'suggestions' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-900' : 'text-slate-400 hover:text-slate-200'}`} title="Suggestions"><Lightbulb size={16} /></button>
           </div>
           <div className="flex-1 overflow-y-auto p-4 custom-scrollbar relative">
             {leftTab === 'chapters' && (
@@ -822,41 +1010,6 @@ export const Editor: React.FC<EditorProps> = ({
                 ))}
                 <button onClick={addChapter} className="w-full py-2 border-2 border-dashed border-slate-800 text-slate-500 rounded-lg hover:border-indigo-500 hover:text-indigo-400 transition-colors flex items-center justify-center gap-2"><Plus size={16} /> Add Chapter</button>
               </div>
-            )}
-
-            {leftTab === 'characters' && (
-                <div className="space-y-4">
-                     <button 
-                        onClick={openNewCharacterModal}
-                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-2 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors mb-2"
-                     >
-                         <Plus size={16} /> Add Character
-                     </button>
-
-                    <div className="space-y-3">
-                        {(book.characters || []).map(char => (
-                            <div key={char.id} className="bg-slate-900 border border-slate-800 rounded-lg p-3 group hover:border-indigo-500/30 transition-colors flex gap-3">
-                                {/* Avatar */}
-                                <div className="flex-shrink-0 w-[30%] aspect-square rounded-lg bg-slate-800 overflow-hidden border border-slate-700 self-start">
-                                    {char.image ? (
-                                        <img src={char.image} alt={char.name} className="w-full h-full object-cover" />
-                                    ) : (
-                                        <div className="w-full h-full flex items-center justify-center text-slate-600"><User size={32}/></div>
-                                    )}
-                                </div>
-
-                                <div className="flex-1 min-w-0">
-                                    <div className="flex justify-between items-start mb-1">
-                                         <span className="font-bold text-sm text-indigo-300 flex items-center gap-2 truncate">{char.name}{char.isGlobal && <span title="Global Character"><Globe size={12} className="text-green-400" /></span>}</span>
-                                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => openEditCharacterModal(char)} className="p-1 hover:text-white text-slate-500"><Edit2 size={12} /></button><button onClick={() => deleteCharacter(char.id)} className="p-1 hover:text-red-400 text-slate-500"><Trash2 size={12} /></button></div>
-                                    </div>
-                                    <div className="flex flex-wrap gap-1 mb-2">{char.aliases.map(t => (<span key={t} className="text-[10px] px-1.5 py-0.5 bg-slate-800 text-slate-400 rounded-full">{t}</span>))}</div>
-                                    <p className="text-xs text-slate-400 line-clamp-2">{char.description}</p>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
             )}
 
             {leftTab === 'brainstorm' && (
@@ -905,11 +1058,112 @@ export const Editor: React.FC<EditorProps> = ({
                 </div>
               </div>
             )}
+
+            {leftTab === 'suggestions' && (
+                <div className="flex flex-col h-full">
+                    {/* Suggestions List */}
+                    <div className="flex-1 overflow-y-auto custom-scrollbar space-y-3 mb-2 p-1">
+                        {generatedSuggestions.length === 0 && (
+                             <div className="text-center text-slate-500 text-xs mt-10 px-4">
+                                {isGeneratingSuggestions ? 'Generating suggestions...' : 'No suggestions yet. Use the builder below to generate plot ideas.'}
+                             </div>
+                        )}
+                        {generatedSuggestions.map(s => (
+                            <div key={s.id} className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden group">
+                                <div className="p-3 cursor-pointer hover:bg-slate-800/50 transition-colors" onClick={() => toggleSuggestionExpand(s.id)}>
+                                    <div className="flex justify-between items-start gap-2">
+                                        <div className="text-sm font-medium text-slate-200">{s.suggestionSummary}</div>
+                                        <div className="text-slate-500">{s.isExpanded ? <ChevronUp size={14}/> : <ChevronDown size={14}/>}</div>
+                                    </div>
+                                    {s.characters.length > 0 && (
+                                        <div className="flex flex-wrap gap-1 mt-2">
+                                            {s.characters.map(c => (
+                                                 <span key={c.id} className="text-[10px] px-1.5 py-0.5 bg-indigo-900/30 text-indigo-300 rounded-full border border-indigo-500/20">{c.name}</span>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                                {s.isExpanded && (
+                                    <div className="px-3 pb-3 pt-1 border-t border-slate-800/50 bg-slate-950/30">
+                                        <p className="text-xs text-slate-400 mb-3 leading-relaxed whitespace-pre-wrap">{s.suggestionDescription}</p>
+                                        <button 
+                                            onClick={() => handleApplySuggestion(s)}
+                                            className="w-full flex items-center justify-center gap-2 bg-indigo-600/90 hover:bg-indigo-500 text-white text-xs py-1.5 rounded transition-colors"
+                                        >
+                                            <Check size={12} /> Apply to Story
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Suggestion Builder */}
+                    <div className="bg-slate-900 rounded-lg border border-slate-800 p-3 shrink-0 flex flex-col gap-3">
+                        <div className="flex justify-between items-center">
+                            <div className="text-xs font-bold text-slate-500 uppercase flex items-center gap-2"><Sparkles size={12}/> Suggestion Builder</div>
+                            {/* Auto Toggle */}
+                            <label className="flex items-center gap-2 cursor-pointer group" title="Automatically generate new ideas after writing">
+                                 <span className="text-[10px] font-bold text-slate-500 group-hover:text-slate-300 transition-colors">Auto-Gen</span>
+                                 <div className="relative w-8 h-4 bg-slate-800 rounded-full border border-slate-700 transition-colors group-hover:border-slate-600">
+                                      <input type="checkbox" className="peer sr-only" checked={autoGenerateSuggestions} onChange={(e) => setAutoGenerateSuggestions(e.target.checked)}/>
+                                      <div className={`absolute top-0.5 left-0.5 w-2.5 h-2.5 bg-slate-500 rounded-full transition-all ${autoGenerateSuggestions ? 'translate-x-4 bg-indigo-400' : ''}`}></div>
+                                 </div>
+                            </label>
+                        </div>
+                        
+                        {/* Character Selector */}
+                        <div className="flex flex-col gap-1">
+                            <label className="text-[10px] uppercase font-bold text-slate-500">Includes Characters</label>
+                            <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto custom-scrollbar bg-slate-950 border border-slate-800 rounded p-2">
+                                {book.characters.length === 0 && <div className="text-[10px] text-slate-600 italic">No characters available.</div>}
+                                {(book.characters || []).map(c => {
+                                    const isSelected = suggestionSelectedCharIds.includes(c.id);
+                                    return (
+                                        <button 
+                                            key={c.id} 
+                                            onClick={() => toggleSuggestionCharSelect(c.id)}
+                                            className={`text-[10px] px-2 py-1 rounded-full border transition-all ${
+                                                isSelected 
+                                                ? 'bg-indigo-600 text-white border-indigo-500 shadow-sm shadow-indigo-500/20' 
+                                                : 'bg-slate-900 text-slate-400 border-slate-700 hover:border-slate-500 hover:text-slate-300'
+                                            }`}
+                                        >
+                                            {c.name}
+                                        </button>
+                                    )
+                                })}
+                            </div>
+                        </div>
+
+                        {/* Keywords */}
+                        <div className="flex flex-col gap-1">
+                            <label className="text-[10px] uppercase font-bold text-slate-500">Keywords & Instructions</label>
+                            <textarea 
+                                className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs outline-none focus:border-indigo-500 resize-none h-16 custom-scrollbar placeholder-slate-600"
+                                placeholder="e.g. Plot twist, sudden arrival, mystery revealed..."
+                                value={suggestionKeywords}
+                                onChange={(e) => setSuggestionKeywords(e.target.value)}
+                            />
+                        </div>
+
+                        {/* Generate Button */}
+                        <button 
+                            onClick={() => handleGenerateSuggestions()}
+                            disabled={isGeneratingSuggestions}
+                            className={`w-full py-2 rounded text-xs font-bold uppercase tracking-wide transition-colors flex items-center justify-center gap-2 ${isGeneratingSuggestions ? 'bg-slate-800 text-slate-500' : 'bg-indigo-600 hover:bg-indigo-500 text-white'}`}
+                        >
+                             <Sparkles size={14} className={isGeneratingSuggestions ? "animate-spin" : ""} /> {isGeneratingSuggestions ? 'Generating...' : 'Generate Ideas'}
+                        </button>
+                    </div>
+                </div>
+            )}
+
           </div>
         </div>
 
         {/* CENTER PANEL */}
-        <div className="flex-1 flex flex-col min-w-0 border-r border-slate-800 bg-slate-950">
+        <div className="flex-1 flex flex-col min-w-0 bg-slate-950">
           {activeChapter ? (
             <>
               <div className="h-[75%] flex flex-col">
@@ -949,222 +1203,73 @@ export const Editor: React.FC<EditorProps> = ({
           )}
         </div>
 
-        {/* RIGHT PANEL: Codex & Settings */}
-        <div className="w-80 flex flex-col bg-slate-925 shrink-0">
+        {/* RIGHT PANEL: Codex & Characters */}
+        <div className={`flex flex-col bg-slate-925 shrink-0 transition-all duration-300 ease-in-out overflow-hidden ${isRightPanelOpen ? 'w-80 border-l border-slate-800' : 'w-0 border-l-0'}`}>
              <div className="flex border-b border-slate-800">
-            <button onClick={() => setRightTab('codex')} className={`flex-1 py-3 text-sm font-medium flex items-center justify-center gap-2 ${rightTab === 'codex' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-900' : 'text-slate-400 hover:text-slate-200'}`}><BookOpen size={16} /> Codex</button>
-            <button onClick={() => setRightTab('settings')} className={`flex-1 py-3 text-sm font-medium flex items-center justify-center gap-2 ${rightTab === 'settings' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-900' : 'text-slate-400 hover:text-slate-200'}`}><Settings size={16} /> Settings</button>
-          </div>
+                <button onClick={() => setRightTab('characters')} className={`flex-1 py-3 text-sm font-medium flex items-center justify-center gap-2 ${rightTab === 'characters' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-900' : 'text-slate-400 hover:text-slate-200'}`} title="Characters"><Users size={16} /> Characters</button>
+                <button onClick={() => setRightTab('codex')} className={`flex-1 py-3 text-sm font-medium flex items-center justify-center gap-2 ${rightTab === 'codex' ? 'text-indigo-400 border-b-2 border-indigo-400 bg-slate-900' : 'text-slate-400 hover:text-slate-200'}`} title="Codex"><BookOpen size={16} /> Codex</button>
+             </div>
 
-          <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-            {rightTab === 'codex' ? (
-                <div className="space-y-4">
-                    <button 
-                        onClick={openNewCodexModal}
-                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-2 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors mb-2"
-                     >
-                         <Plus size={16} /> Add Codex Entry
-                     </button>
+             <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                {rightTab === 'codex' && (
+                    <div className="space-y-4">
+                        <button 
+                            onClick={openNewCodexModal}
+                            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-2 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors mb-2"
+                        >
+                            <Plus size={16} /> Add Codex Entry
+                        </button>
 
-                    <div className="space-y-3">
-                        {book.codex.map(item => (
-                            <div key={item.id} className="bg-slate-900 border border-slate-800 rounded-lg p-3 group hover:border-indigo-500/30 transition-colors">
-                                <div className="flex justify-between items-start mb-1">
-                                     <span className="font-bold text-sm text-indigo-300 flex items-center gap-2">{item.title}{item.isGlobal && <span title="Global Entry"><Globe size={12} className="text-green-400" /></span>}</span>
-                                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => openEditCodexModal(item)} className="p-1 hover:text-white text-slate-500"><Edit2 size={12} /></button><button onClick={() => deleteCodex(item.id)} className="p-1 hover:text-red-400 text-slate-500"><Trash2 size={12} /></button></div>
-                                </div>
-                                <div className="flex flex-wrap gap-1 mb-2">{item.tags.map(t => (<span key={t} className="text-[10px] px-1.5 py-0.5 bg-slate-800 text-slate-400 rounded-full">{t}</span>))}</div>
-                                <p className="text-xs text-slate-400 line-clamp-3">{item.content}</p>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            ) : (
-                <div className="space-y-4">
-                    {/* Book Configuration Section */}
-                     <div className="bg-slate-900 p-4 rounded-lg border border-slate-800">
-                        <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4 border-b border-slate-800 pb-2 flex items-center gap-2"><BookOpen size={14}/> Book Configuration</h4>
                         <div className="space-y-3">
-                             <div>
-                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Point of View (POV)</label>
-                                <div className="relative">
-                                    <select 
-                                        className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
-                                        value={book.pov}
-                                        onChange={(e) => onUpdateBook(book.id, { pov: e.target.value })}
-                                    >
-                                        {POV_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                                    </select>
-                                    <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
+                            {book.codex.map(item => (
+                                <div key={item.id} className="bg-slate-900 border border-slate-800 rounded-lg p-3 group hover:border-indigo-500/30 transition-colors">
+                                    <div className="flex justify-between items-start mb-1">
+                                        <span className="font-bold text-sm text-indigo-300 flex items-center gap-2">{item.title}{item.isGlobal && <span title="Global Entry"><Globe size={12} className="text-green-400" /></span>}</span>
+                                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => openEditCodexModal(item)} className="p-1 hover:text-white text-slate-500"><Edit2 size={12} /></button><button onClick={() => deleteCodex(item.id)} className="p-1 hover:text-red-400 text-slate-500"><Trash2 size={12} /></button></div>
+                                    </div>
+                                    <div className="flex flex-wrap gap-1 mb-2">{item.tags.map(t => (<span key={t} className="text-[10px] px-1.5 py-0.5 bg-slate-800 text-slate-400 rounded-full">{t}</span>))}</div>
+                                    <p className="text-xs text-slate-400 line-clamp-3">{item.content}</p>
                                 </div>
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Tense</label>
-                                <div className="relative">
-                                    <select 
-                                        className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
-                                        value={book.tense}
-                                        onChange={(e) => onUpdateBook(book.id, { tense: e.target.value })}
-                                    >
-                                        {TENSE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                                    </select>
-                                    <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
-                                </div>
-                            </div>
-                        </div>
-                     </div>
-
-                     <div className="bg-slate-900 p-4 rounded-lg border border-slate-800">
-                        <h4 className="text-xs font-bold text-slate-400 uppercase mb-4 border-b border-slate-800 pb-2">Global Provider Configuration</h4>
-                        
-                        <div className="flex bg-slate-950 rounded p-1 mb-4">
-                            {(['google', 'openrouter', 'lmstudio', 'venice'] as LLMProvider[]).map(p => (
-                                <button
-                                    key={p}
-                                    onClick={() => setSettingsSelectedProvider(p)}
-                                    className={`flex-1 text-xs py-1 rounded capitalize ${settingsSelectedProvider === p ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-                                >
-                                    {p === 'lmstudio' ? 'LM Studio' : p === 'venice' ? 'Venice' : p}
-                                </button>
                             ))}
                         </div>
+                    </div>
+                )}
 
-                        <div className="space-y-3 animate-in fade-in duration-300">
-                             {settingsSelectedProvider !== 'google' && settingsSelectedProvider !== 'lmstudio' && (
-                                <div>
-                                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">API Key</label>
-                                    <input 
-                                        type="password"
-                                        className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
-                                        value={providerConfigs[settingsSelectedProvider]?.apiKey || ''}
-                                        onChange={(e) => updateProviderConfig(settingsSelectedProvider, { apiKey: e.target.value })}
-                                        placeholder="Enter Key"
-                                    />
-                                </div>
-                             )}
+                {rightTab === 'characters' && (
+                    <div className="space-y-4">
+                        <button 
+                            onClick={openNewCharacterModal}
+                            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-2 rounded-lg text-sm flex items-center justify-center gap-2 transition-colors mb-2"
+                        >
+                            <Plus size={16} /> Add Character
+                        </button>
 
-                             {settingsSelectedProvider !== 'google' && (
-                                <div>
-                                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Base URL</label>
-                                    <input 
-                                        type="text"
-                                        className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
-                                        value={providerConfigs[settingsSelectedProvider]?.baseUrl || ''}
-                                        onChange={(e) => updateProviderConfig(settingsSelectedProvider, { baseUrl: e.target.value })}
-                                        placeholder="e.g. http://localhost:1234/v1"
-                                    />
-                                </div>
-                             )}
-
-                            <div>
-                                <div className="flex justify-between items-center mb-1">
-                                     <label className="block text-xs font-bold text-slate-500 uppercase">Cached Models</label>
-                                     <button 
-                                        onClick={handleFetchModelsForSettings} 
-                                        disabled={isFetchingModels}
-                                        className="text-[10px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
-                                     >
-                                         <RefreshCw size={10} className={isFetchingModels ? "animate-spin" : ""} /> Refresh List
-                                     </button>
-                                </div>
-                                <div className="bg-slate-950 border border-slate-800 rounded h-32 overflow-y-auto p-2 custom-scrollbar">
-                                    {providerConfigs[settingsSelectedProvider]?.availableModels?.length ? (
-                                        providerConfigs[settingsSelectedProvider].availableModels?.map(m => (
-                                            <div key={m} className="text-xs text-slate-400 py-0.5">{m}</div>
-                                        ))
-                                    ) : (
-                                        <div className="text-xs text-slate-600 italic text-center mt-4">No models loaded. Click Refresh.</div>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                     </div>
-
-                     {/* Brainstorming Configuration Section */}
-                     <div className="bg-slate-900 p-4 rounded-lg border border-slate-800">
-                        <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4 border-b border-slate-800 pb-2 flex items-center gap-2"><MessageSquare size={14}/> Brainstorming Config</h4>
-                        
                         <div className="space-y-3">
-                            <div>
-                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
-                                <select 
-                                    className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
-                                    value={brainstormConfig.provider}
-                                    onChange={(e) => onUpdateSettings({...brainstormConfig, provider: e.target.value as LLMProvider}, summaryConfig, providerConfigs)}
-                                >
-                                    <option value="google">Google Gemini</option>
-                                    <option value="openrouter">OpenRouter</option>
-                                    <option value="lmstudio">LM Studio</option>
-                                    <option value="venice">Venice AI</option>
-                                </select>
-                            </div>
+                            {(book.characters || []).map(char => (
+                                <div key={char.id} className="bg-slate-900 border border-slate-800 rounded-lg p-3 group hover:border-indigo-500/30 transition-colors flex gap-3">
+                                    {/* Avatar */}
+                                    <div className="flex-shrink-0 w-[30%] aspect-square rounded-lg bg-slate-800 overflow-hidden border border-slate-700 self-start">
+                                        {char.image ? (
+                                            <img src={char.image} alt={char.name} className="w-full h-full object-cover" />
+                                        ) : (
+                                            <div className="w-full h-full flex items-center justify-center text-slate-600"><User size={32}/></div>
+                                        )}
+                                    </div>
 
-                            <div>
-                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
-                                <SearchableModelSelect 
-                                    value={brainstormConfig.model}
-                                    options={providerConfigs[brainstormConfig.provider]?.availableModels || []}
-                                    onChange={(val) => onUpdateSettings({...brainstormConfig, model: val}, summaryConfig, providerConfigs)}
-                                    placeholder="Select Model"
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Instruction</label>
-                                <textarea 
-                                    className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed"
-                                    value={brainstormConfig.systemInstruction}
-                                    onChange={(e) => onUpdateSettings({...brainstormConfig, systemInstruction: e.target.value}, summaryConfig, providerConfigs)}
-                                    placeholder="Variables: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}"
-                                />
-                            </div>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="flex justify-between items-start mb-1">
+                                            <span className="font-bold text-sm text-indigo-300 flex items-center gap-2 truncate">{char.name}{char.isGlobal && <span title="Global Character"><Globe size={12} className="text-green-400" /></span>}</span>
+                                            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><button onClick={() => openEditCharacterModal(char)} className="p-1 hover:text-white text-slate-500"><Edit2 size={12} /></button><button onClick={() => deleteCharacter(char.id)} className="p-1 hover:text-red-400 text-slate-500"><Trash2 size={12} /></button></div>
+                                        </div>
+                                        <div className="flex flex-wrap gap-1 mb-2">{char.aliases.map(t => (<span key={t} className="text-[10px] px-1.5 py-0.5 bg-slate-800 text-slate-400 rounded-full">{t}</span>))}</div>
+                                        <p className="text-xs text-slate-400 line-clamp-2">{char.description}</p>
+                                    </div>
+                                </div>
+                            ))}
                         </div>
-                     </div>
-
-                     {/* Auto Summary Configuration Section */}
-                     <div className="bg-slate-900 p-4 rounded-lg border border-slate-800">
-                        <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4 border-b border-slate-800 pb-2 flex items-center gap-2"><FileText size={14}/> Auto Summary Config</h4>
-                        
-                        <div className="space-y-3">
-                            <div>
-                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
-                                <select 
-                                    className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
-                                    value={summaryConfig.provider}
-                                    onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, provider: e.target.value as LLMProvider}, providerConfigs)}
-                                >
-                                    <option value="google">Google Gemini</option>
-                                    <option value="openrouter">OpenRouter</option>
-                                    <option value="lmstudio">LM Studio</option>
-                                    <option value="venice">Venice AI</option>
-                                </select>
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
-                                <SearchableModelSelect 
-                                    value={summaryConfig.model}
-                                    options={providerConfigs[summaryConfig.provider]?.availableModels || []}
-                                    onChange={(val) => onUpdateSettings(brainstormConfig, {...summaryConfig, model: val}, providerConfigs)}
-                                    placeholder="Select Model"
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Instruction</label>
-                                <textarea 
-                                    className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed"
-                                    value={summaryConfig.systemInstruction}
-                                    onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, systemInstruction: e.target.value}, providerConfigs)}
-                                     placeholder="Variables: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}"
-                                />
-                            </div>
-                        </div>
-                     </div>
-                </div>
-            )}
-          </div>
+                    </div>
+                )}
+            </div>
         </div>
       </div>
 
@@ -1191,6 +1296,274 @@ export const Editor: React.FC<EditorProps> = ({
             </details>
         </div>
       )}
+
+      {/* Settings Modal */}
+      {isSettingsModalOpen && (
+           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setIsSettingsModalOpen(false)}>
+               <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[900px] h-[700px] flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+                    <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-850 shrink-0">
+                       <h3 className="font-bold text-slate-200 flex items-center gap-2"><Settings size={18} className="text-indigo-400"/> Settings</h3>
+                       <button onClick={() => setIsSettingsModalOpen(false)} className="text-slate-500 hover:text-white"><X size={20} /></button>
+                   </div>
+                   
+                   {/* Settings Tabs */}
+                   <div className="flex bg-slate-900 border-b border-slate-800 shrink-0 overflow-x-auto">
+                        <button onClick={() => setSettingsTab('general')} className={`px-4 py-3 text-xs font-bold uppercase tracking-wide border-b-2 transition-colors whitespace-nowrap ${settingsTab === 'general' ? 'border-indigo-500 text-indigo-400 bg-slate-800/50' : 'border-transparent text-slate-500 hover:text-slate-300 hover:bg-slate-800/30'}`}>General</button>
+                        <button onClick={() => setSettingsTab('providers')} className={`px-4 py-3 text-xs font-bold uppercase tracking-wide border-b-2 transition-colors whitespace-nowrap ${settingsTab === 'providers' ? 'border-indigo-500 text-indigo-400 bg-slate-800/50' : 'border-transparent text-slate-500 hover:text-slate-300 hover:bg-slate-800/30'}`}>Providers</button>
+                        <button onClick={() => setSettingsTab('brainstorm')} className={`px-4 py-3 text-xs font-bold uppercase tracking-wide border-b-2 transition-colors whitespace-nowrap ${settingsTab === 'brainstorm' ? 'border-indigo-500 text-indigo-400 bg-slate-800/50' : 'border-transparent text-slate-500 hover:text-slate-300 hover:bg-slate-800/30'}`}>Brainstorm</button>
+                        <button onClick={() => setSettingsTab('suggestions')} className={`px-4 py-3 text-xs font-bold uppercase tracking-wide border-b-2 transition-colors whitespace-nowrap ${settingsTab === 'suggestions' ? 'border-indigo-500 text-indigo-400 bg-slate-800/50' : 'border-transparent text-slate-500 hover:text-slate-300 hover:bg-slate-800/30'}`}>Suggestions</button>
+                        <button onClick={() => setSettingsTab('summary')} className={`px-4 py-3 text-xs font-bold uppercase tracking-wide border-b-2 transition-colors whitespace-nowrap ${settingsTab === 'summary' ? 'border-indigo-500 text-indigo-400 bg-slate-800/50' : 'border-transparent text-slate-500 hover:text-slate-300 hover:bg-slate-800/30'}`}>Summary</button>
+                   </div>
+
+                   <div className="p-6 flex-1 overflow-y-auto space-y-6 custom-scrollbar bg-slate-925">
+                         {/* Book Configuration Section */}
+                        {settingsTab === 'general' && (
+                            <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                                <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4 border-b border-slate-800 pb-2 flex items-center gap-2"><BookOpen size={14}/> Book Configuration</h4>
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Point of View (POV)</label>
+                                        <div className="relative">
+                                            <select 
+                                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
+                                                value={book.pov}
+                                                onChange={(e) => onUpdateBook(book.id, { pov: e.target.value })}
+                                            >
+                                                {POV_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                            </select>
+                                            <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Tense</label>
+                                        <div className="relative">
+                                            <select 
+                                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 appearance-none"
+                                                value={book.tense}
+                                                onChange={(e) => onUpdateBook(book.id, { tense: e.target.value })}
+                                            >
+                                                {TENSE_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                            </select>
+                                            <div className="absolute right-3 top-2.5 pointer-events-none text-slate-500"><MoreHorizontal size={14} /></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Global Provider Configuration */}
+                        {settingsTab === 'providers' && (
+                            <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                                <h4 className="text-xs font-bold text-slate-400 uppercase mb-4 border-b border-slate-800 pb-2">Global Provider Configuration</h4>
+                                
+                                <div className="flex bg-slate-900 rounded p-1 mb-4">
+                                    {(['google', 'openrouter', 'lmstudio', 'venice'] as LLMProvider[]).map(p => (
+                                        <button
+                                            key={p}
+                                            onClick={() => setSettingsSelectedProvider(p)}
+                                            className={`flex-1 text-xs py-1 rounded capitalize ${settingsSelectedProvider === p ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                                        >
+                                            {p === 'lmstudio' ? 'LM Studio' : p === 'venice' ? 'Venice' : p}
+                                        </button>
+                                    ))}
+                                </div>
+
+                                <div className="space-y-3 animate-in fade-in duration-300">
+                                    {settingsSelectedProvider !== 'google' && settingsSelectedProvider !== 'lmstudio' && (
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">API Key</label>
+                                            <input 
+                                                type="password"
+                                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
+                                                value={providerConfigs[settingsSelectedProvider]?.apiKey || ''}
+                                                onChange={(e) => updateProviderConfig(settingsSelectedProvider, { apiKey: e.target.value })}
+                                                placeholder="Enter Key"
+                                            />
+                                        </div>
+                                    )}
+
+                                    {settingsSelectedProvider !== 'google' && (
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Base URL</label>
+                                            <input 
+                                                type="text"
+                                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
+                                                value={providerConfigs[settingsSelectedProvider]?.baseUrl || ''}
+                                                onChange={(e) => updateProviderConfig(settingsSelectedProvider, { baseUrl: e.target.value })}
+                                                placeholder="e.g. http://localhost:1234/v1"
+                                            />
+                                        </div>
+                                    )}
+
+                                    <div>
+                                        <div className="flex justify-between items-center mb-1">
+                                            <label className="block text-xs font-bold text-slate-500 uppercase">Cached Models</label>
+                                            <button 
+                                                onClick={handleFetchModelsForSettings} 
+                                                disabled={isFetchingModels}
+                                                className="text-[10px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
+                                            >
+                                                <RefreshCw size={10} className={isFetchingModels ? "animate-spin" : ""} /> Refresh List
+                                            </button>
+                                        </div>
+                                        <div className="bg-slate-900 border border-slate-800 rounded h-32 overflow-y-auto p-2 custom-scrollbar">
+                                            {providerConfigs[settingsSelectedProvider]?.availableModels?.length ? (
+                                                providerConfigs[settingsSelectedProvider].availableModels?.map(m => (
+                                                    <div key={m} className="text-xs text-slate-400 py-0.5">{m}</div>
+                                                ))
+                                            ) : (
+                                                <div className="text-xs text-slate-600 italic text-center mt-4">No models loaded. Click Refresh.</div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Brainstorming Configuration Section */}
+                        {settingsTab === 'brainstorm' && (
+                            <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                                <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4 border-b border-slate-800 pb-2 flex items-center gap-2"><MessageSquare size={14}/> Brainstorming Config</h4>
+                                
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
+                                        <select 
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
+                                            value={brainstormConfig.provider}
+                                            onChange={(e) => onUpdateSettings({...brainstormConfig, provider: e.target.value as LLMProvider}, summaryConfig, suggestionConfig, providerConfigs)}
+                                        >
+                                            <option value="google">Google Gemini</option>
+                                            <option value="openrouter">OpenRouter</option>
+                                            <option value="lmstudio">LM Studio</option>
+                                            <option value="venice">Venice AI</option>
+                                        </select>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
+                                        <SearchableModelSelect 
+                                            value={brainstormConfig.model}
+                                            options={providerConfigs[brainstormConfig.provider]?.availableModels || []}
+                                            onChange={(val) => onUpdateSettings({...brainstormConfig, model: val}, summaryConfig, suggestionConfig, providerConfigs)}
+                                            placeholder="Select Model"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Instruction</label>
+                                        <textarea 
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-64 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                            value={brainstormConfig.systemInstruction}
+                                            onChange={(e) => onUpdateSettings({...brainstormConfig, systemInstruction: e.target.value}, summaryConfig, suggestionConfig, providerConfigs)}
+                                            placeholder="Variables: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Suggestions Configuration Section */}
+                        {settingsTab === 'suggestions' && (
+                            <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                                <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4 border-b border-slate-800 pb-2 flex items-center gap-2"><Lightbulb size={14}/> Suggestions Config</h4>
+                                
+                                <div className="space-y-3">
+                                    <div className="flex gap-4">
+                                         <div className="flex-1">
+                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
+                                            <select 
+                                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
+                                                value={suggestionConfig.provider}
+                                                onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, provider: e.target.value as LLMProvider}, providerConfigs)}
+                                            >
+                                                <option value="google">Google Gemini</option>
+                                                <option value="openrouter">OpenRouter</option>
+                                                <option value="lmstudio">LM Studio</option>
+                                                <option value="venice">Venice AI</option>
+                                            </select>
+                                        </div>
+                                        <div className="w-24">
+                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Count</label>
+                                            <input 
+                                                type="number"
+                                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
+                                                value={suggestionConfig.count}
+                                                onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, count: parseInt(e.target.value) || 5}, providerConfigs)}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
+                                        <SearchableModelSelect 
+                                            value={suggestionConfig.model}
+                                            options={providerConfigs[suggestionConfig.provider]?.availableModels || []}
+                                            onChange={(val) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, model: val}, providerConfigs)}
+                                            placeholder="Select Model"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Instruction</label>
+                                        <textarea 
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-64 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                            value={suggestionConfig.systemInstruction}
+                                            onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, systemInstruction: e.target.value}, providerConfigs)}
+                                            placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Auto Summary Configuration Section */}
+                        {settingsTab === 'summary' && (
+                            <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                                <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4 border-b border-slate-800 pb-2 flex items-center gap-2"><FileText size={14}/> Auto Summary Config</h4>
+                                
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
+                                        <select 
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
+                                            value={summaryConfig.provider}
+                                            onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, provider: e.target.value as LLMProvider}, suggestionConfig, providerConfigs)}
+                                        >
+                                            <option value="google">Google Gemini</option>
+                                            <option value="openrouter">OpenRouter</option>
+                                            <option value="lmstudio">LM Studio</option>
+                                            <option value="venice">Venice AI</option>
+                                        </select>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
+                                        <SearchableModelSelect 
+                                            value={summaryConfig.model}
+                                            options={providerConfigs[summaryConfig.provider]?.availableModels || []}
+                                            onChange={(val) => onUpdateSettings(brainstormConfig, {...summaryConfig, model: val}, suggestionConfig, providerConfigs)}
+                                            placeholder="Select Model"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Instruction</label>
+                                        <textarea 
+                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-64 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                            value={summaryConfig.systemInstruction}
+                                            onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, systemInstruction: e.target.value}, suggestionConfig, providerConfigs)}
+                                                placeholder="Variables: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                   </div>
+               </div>
+           </div>
+       )}
 
       {/* Summary Modal */}
       {summaryModalChapterId && (

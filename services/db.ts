@@ -1,5 +1,6 @@
 
-import { Book, BrainstormConfig, PromptKind, ProviderConfigs, SummaryConfig } from '../types';
+
+import { Book, BrainstormConfig, PromptKind, ProviderConfigs, SuggestionConfig, SummaryConfig } from '../types';
 
 const DB_NAME = 'StoryWeaverDB';
 const DB_VERSION = 2; 
@@ -63,7 +64,7 @@ export const db = {
     });
   },
 
-  async getSettings(): Promise<{ brainstorm?: BrainstormConfig, summary?: SummaryConfig, providers?: ProviderConfigs } | undefined> {
+  async getSettings(): Promise<{ brainstorm?: BrainstormConfig, summary?: SummaryConfig, suggestion?: SuggestionConfig, providers?: ProviderConfigs } | undefined> {
     const db = await this.open();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORE_SETTINGS, 'readonly');
@@ -71,6 +72,7 @@ export const db = {
       
       const requestBrainstorm = store.get('brainstormConfig');
       const requestSummary = store.get('summaryConfig');
+      const requestSuggestion = store.get('suggestionConfig');
       const requestProviders = store.get('providerConfigs');
       
       let result: any = {};
@@ -80,9 +82,12 @@ export const db = {
           result.brainstorm = requestBrainstorm.result;
           requestSummary.onsuccess = () => {
             result.summary = requestSummary.result;
-            requestProviders.onsuccess = () => {
-                result.providers = requestProviders.result;
-                resolve(result);
+            requestSuggestion.onsuccess = () => {
+                result.suggestion = requestSuggestion.result;
+                requestProviders.onsuccess = () => {
+                    result.providers = requestProviders.result;
+                    resolve(result);
+                }
             }
           }
       }
@@ -90,13 +95,14 @@ export const db = {
     });
   },
 
-  async saveSettings(brainstormConfig: BrainstormConfig, summaryConfig: SummaryConfig, providerConfigs: ProviderConfigs): Promise<void> {
+  async saveSettings(brainstormConfig: BrainstormConfig, summaryConfig: SummaryConfig, suggestionConfig: SuggestionConfig, providerConfigs: ProviderConfigs): Promise<void> {
     const db = await this.open();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORE_SETTINGS, 'readwrite');
       const store = transaction.objectStore(STORE_SETTINGS);
       store.put(brainstormConfig, 'brainstormConfig');
       store.put(summaryConfig, 'summaryConfig');
+      store.put(suggestionConfig, 'suggestionConfig');
       store.put(providerConfigs, 'providerConfigs');
       
       transaction.oncomplete = () => resolve();

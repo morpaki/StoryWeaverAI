@@ -1,4 +1,5 @@
 
+
 import { GoogleGenAI } from "@google/genai";
 import { LLMConfig, Message } from '../types';
 
@@ -83,7 +84,8 @@ export class LLMService {
             config: {
                 systemInstruction: systemInstruction,
                 maxOutputTokens: config.maxTokens,
-                temperature: config.temperature
+                temperature: config.temperature,
+                responseMimeType: config.responseMimeType
             },
             history: chatHistory
         });
@@ -98,7 +100,8 @@ export class LLMService {
             config: {
                 systemInstruction: systemInstruction,
                 maxOutputTokens: config.maxTokens,
-                temperature: config.temperature
+                temperature: config.temperature,
+                responseMimeType: config.responseMimeType
             }
         });
         return response.text || "";
@@ -125,6 +128,17 @@ export class LLMService {
     const baseUrl = this.getGenericBaseUrl(config);
     const url = `${baseUrl}/chat/completions`;
 
+    const body: any = {
+        model: config.modelName,
+        messages: messages,
+        temperature: config.temperature ?? 0.7,
+        max_tokens: config.maxTokens
+    };
+
+    if (config.responseMimeType === 'application/json') {
+        body.response_format = { type: 'json_object' };
+    }
+
     try {
         const response = await fetch(url, {
             method: 'POST',
@@ -133,12 +147,7 @@ export class LLMService {
                 'Authorization': `Bearer ${config.apiKey}`,
                 ...(config.provider === 'openrouter' ? { 'HTTP-Referer': window.location.origin } : {})
             },
-            body: JSON.stringify({
-                model: config.modelName,
-                messages: messages,
-                temperature: config.temperature ?? 0.7,
-                max_tokens: config.maxTokens
-            })
+            body: JSON.stringify(body)
         });
 
         if (!response.ok) {
