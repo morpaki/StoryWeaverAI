@@ -1,6 +1,3 @@
-
-
-
 import React, { useState, useEffect } from 'react';
 import { AppState, Book, BrainstormConfig, LLMConfig, PromptKind, ProviderConfigs, SuggestionConfig, SummaryConfig } from './types';
 import { Library } from './components/Library';
@@ -56,6 +53,9 @@ Do not add markdown formatting or explanations outside the JSON.`,
 
 REQUIRED CHARACTERS (Must be included):
 {characters}
+
+GLOBAL CONTEXT (World Info):
+{globalCodex}
 
 ADDITIONAL KEYWORDS/ELEMENTS (Must be included):
 {keywords}`
@@ -123,6 +123,11 @@ const App: React.FC = () => {
                  instruction: DEFAULT_SUGGESTION_CONFIG.instruction, // Force default instruction to ensure {characters} exists
                  systemInstruction: undefined
              };
+        } else if (suggestionConfig.instruction && !suggestionConfig.instruction.includes('{globalCodex}')) {
+             // Migration to add {globalCodex} if missing from what looks like a default instruction
+             if (suggestionConfig.instruction.includes('{characters}') && suggestionConfig.instruction.includes('{keywords}')) {
+                 suggestionConfig.instruction = DEFAULT_SUGGESTION_CONFIG.instruction;
+             }
         }
 
         // Migration: PromptKinds

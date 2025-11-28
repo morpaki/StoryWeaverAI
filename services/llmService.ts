@@ -1,5 +1,3 @@
-
-
 import { GoogleGenAI } from "@google/genai";
 import { LLMConfig, Message } from '../types';
 
@@ -9,13 +7,14 @@ export class LLMService {
     prompt: string, 
     systemInstruction: string, 
     config: LLMConfig,
-    history: Message[] = []
+    history: Message[] = [],
+    signal?: AbortSignal
   ): Promise<string> {
     
     if (config.provider === 'google') {
-      return this.generateGemini(prompt, systemInstruction, config, history);
+      return this.generateGemini(prompt, systemInstruction, config, history, signal);
     } else {
-      return this.generateGeneric(prompt, systemInstruction, config, history);
+      return this.generateGeneric(prompt, systemInstruction, config, history, signal);
     }
   }
 
@@ -61,62 +60,75 @@ export class LLMService {
     prompt: string, 
     systemInstruction: string, 
     config: LLMConfig,
-    history: Message[]
+    history: Message[],
+    signal?: AbortSignal
   ): Promise<string> {
-    // The API key must be obtained exclusively from the environment variable process.env.API_KEY.
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    // Wrapper to allow cancellation via race, as SDK might not support signal directly in all calls
+    const generatePromise = (async () => {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-    // Convert internal message format to Gemini format if needed, 
-    // but for single text generation with system instruction, 
-    // we mostly care about the prompt and system config.
-    // For chat (brainstorming), we use history.
+        try {
+          if (history.length > 0) {
+            // Chat mode
+            const chatHistory = history.map(h => ({
+                role: h.role === 'model' ? 'model' : 'user',
+                parts: [{ text: h.content }]
+            }));
+    
+            const chat = ai.chats.create({
+                model: config.modelName || 'gemini-2.5-flash',
+                config: {
+                    systemInstruction: systemInstruction,
+                    maxOutputTokens: config.maxTokens,
+                    temperature: config.temperature,
+                    responseMimeType: config.responseMimeType
+                },
+                history: chatHistory
+            });
+    
+            const response = await chat.sendMessage({ message: prompt });
+            return response.text || "";
+          } else {
+            // Single completion mode (Story continuation)
+            const response = await ai.models.generateContent({
+                model: config.modelName || 'gemini-2.5-flash',
+                contents: prompt,
+                config: {
+                    systemInstruction: systemInstruction,
+                    maxOutputTokens: config.maxTokens,
+                    temperature: config.temperature,
+                    responseMimeType: config.responseMimeType
+                }
+            });
+            return response.text || "";
+          }
+        } catch (error: any) {
+            console.error("Gemini API Error:", error);
+            throw error;
+        }
+    })();
 
-    try {
-      if (history.length > 0) {
-        // Chat mode
-        const chatHistory = history.map(h => ({
-            role: h.role === 'model' ? 'model' : 'user',
-            parts: [{ text: h.content }]
-        }));
-
-        const chat = ai.chats.create({
-            model: config.modelName || 'gemini-2.5-flash',
-            config: {
-                systemInstruction: systemInstruction,
-                maxOutputTokens: config.maxTokens,
-                temperature: config.temperature,
-                responseMimeType: config.responseMimeType
-            },
-            history: chatHistory
-        });
-
-        const response = await chat.sendMessage({ message: prompt });
-        return response.text || "";
-      } else {
-        // Single completion mode (Story continuation)
-        const response = await ai.models.generateContent({
-            model: config.modelName || 'gemini-2.5-flash',
-            contents: prompt,
-            config: {
-                systemInstruction: systemInstruction,
-                maxOutputTokens: config.maxTokens,
-                temperature: config.temperature,
-                responseMimeType: config.responseMimeType
-            }
-        });
-        return response.text || "";
-      }
-    } catch (error: any) {
-        console.error("Gemini API Error:", error);
-        throw error;
+    if (signal) {
+        if (signal.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
+        
+        return Promise.race([
+            generatePromise,
+            new Promise<string>((_, reject) => {
+                const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+                signal.addEventListener("abort", onAbort);
+            })
+        ]);
     }
+
+    return generatePromise;
   }
 
   private static async generateGeneric(
     prompt: string, 
     systemInstruction: string, 
     config: LLMConfig,
-    history: Message[]
+    history: Message[],
+    signal?: AbortSignal
   ): Promise<string> {
     
     const messages = [
@@ -147,7 +159,8 @@ export class LLMService {
                 'Authorization': `Bearer ${config.apiKey}`,
                 ...(config.provider === 'openrouter' ? { 'HTTP-Referer': window.location.origin } : {})
             },
-            body: JSON.stringify(body)
+            body: JSON.stringify(body),
+            signal: signal
         });
 
         if (!response.ok) {
@@ -158,6 +171,10 @@ export class LLMService {
         const data = await response.json();
         return data.choices?.[0]?.message?.content || "";
     } catch (error: any) {
+        // Rethrow AbortError specifically or generic error
+        if (error.name === 'AbortError') {
+            throw error;
+        }
         console.error("Generic LLM Error:", error);
         throw error;
     }

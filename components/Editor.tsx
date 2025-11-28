@@ -1,6 +1,3 @@
-
-
-
 import React, { useState, useEffect, useRef } from 'react';
 import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig, SuggestionConfig } from '../types';
 import { 
@@ -159,6 +156,7 @@ export const Editor: React.FC<EditorProps> = ({
   const [brainstormContextType, setBrainstormContextType] = useState<BrainstormContextType>('none');
   const [brainstormSelectedChapters, setBrainstormSelectedChapters] = useState<string[]>([]);
   const [isContextSelectorOpen, setIsContextSelectorOpen] = useState(false);
+  const [isBrainstormGenerating, setIsBrainstormGenerating] = useState(false);
   
   // Suggestion States
   const [generatedSuggestions, setGeneratedSuggestions] = useState<GeneratedSuggestion[]>([]);
@@ -170,7 +168,7 @@ export const Editor: React.FC<EditorProps> = ({
   // Prompt State
   const [promptInput, setPromptInput] = useState('');
   const [selectedKindId, setSelectedKindId] = useState<string>(promptKinds[0]?.id || '');
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [isStoryGenerating, setIsStoryGenerating] = useState(false);
 
   // Retry State
   const [lastGeneration, setLastGeneration] = useState<{ prompt: string; responseLength: number; kindId: string } | null>(null);
@@ -207,6 +205,11 @@ export const Editor: React.FC<EditorProps> = ({
   // Settings Tab State
   const [settingsSelectedProvider, setSettingsSelectedProvider] = useState<LLMProvider>('google');
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+
+  // Cancellation Refs
+  const storyAbortController = useRef<AbortController | null>(null);
+  const brainstormAbortController = useRef<AbortController | null>(null);
+  const suggestionAbortController = useRef<AbortController | null>(null);
 
   const activeChapter = book.chapters.find(c => c.id === activeChapterId);
 
@@ -471,6 +474,12 @@ export const Editor: React.FC<EditorProps> = ({
   // --- Suggestion Logic ---
   
   const handleGenerateSuggestions = async (overrideContent?: string) => {
+      if (suggestionAbortController.current) {
+          suggestionAbortController.current.abort();
+      }
+      const ac = new AbortController();
+      suggestionAbortController.current = ac;
+
       setGeneratedSuggestions([]); // Always clear suggestions before generation
       setIsGeneratingSuggestions(true);
       setErrorState(null);
@@ -484,6 +493,12 @@ export const Editor: React.FC<EditorProps> = ({
               : "No specific characters required.";
               
           const keywordsText = suggestionKeywords.trim() ? suggestionKeywords : "No specific keywords provided.";
+
+          // Prepare Global Codex
+          const globalCodexItems = book.codex.filter(item => item.isGlobal);
+          const globalCodexText = globalCodexItems.length > 0 
+              ? globalCodexItems.map(c => `[${c.title}]: ${c.content}`).join('\n\n') 
+              : "No global world context.";
 
           // Prepare Context for Prompt
           const contextParts: string[] = [];
@@ -517,7 +532,8 @@ export const Editor: React.FC<EditorProps> = ({
           let instruction = suggestionConfig.instruction
               .replace('{count}', (suggestionConfig.count || 5).toString())
               .replace('{characters}', charDetailsText)
-              .replace('{keywords}', keywordsText);
+              .replace('{keywords}', keywordsText)
+              .replace('{globalCodex}', globalCodexText);
               
           instruction = parseTemplate(instruction, book, activeChapter);
 
@@ -537,7 +553,7 @@ ${instruction}
               responseMimeType: 'application/json' 
           });
 
-          const responseText = await LLMService.generateCompletion(fullPrompt, systemRole, config);
+          const responseText = await LLMService.generateCompletion(fullPrompt, systemRole, config, [], ac.signal);
 
           // Attempt Parsing JSON
           let parsedData = [];
@@ -580,9 +596,18 @@ ${instruction}
 
           setGeneratedSuggestions(finalSuggestions);
 
-      } catch (e) {
+      } catch (e: any) {
+          if (e.name === 'AbortError') return;
           handleError(e);
       } finally {
+          setIsGeneratingSuggestions(false);
+          suggestionAbortController.current = null;
+      }
+  };
+
+  const cancelSuggestions = () => {
+      if (suggestionAbortController.current) {
+          suggestionAbortController.current.abort();
           setIsGeneratingSuggestions(false);
       }
   };
@@ -616,8 +641,15 @@ ${instruction}
         alert("No prompt kind selected");
         return;
     }
+    
+    // Abort previous
+    if (storyAbortController.current) {
+        storyAbortController.current.abort();
+    }
+    const ac = new AbortController();
+    storyAbortController.current = ac;
 
-    setIsGenerating(true);
+    setIsStoryGenerating(true);
     setErrorState(null);
 
     // 1. Identify Codex Items
@@ -731,7 +763,9 @@ ${activePrompt}`;
       const result = await LLMService.generateCompletion(
           fullPrompt, 
           systemRole, 
-          config
+          config,
+          [],
+          ac.signal
       );
       
       const newContent = currentChapterContent + (currentChapterContent && result ? "\n\n" : "") + result;
@@ -751,10 +785,19 @@ ${activePrompt}`;
       }
 
     } catch (error: any) {
+      if (error.name === 'AbortError') return;
       handleError(error);
     } finally {
-      setIsGenerating(false);
+      setIsStoryGenerating(false);
+      storyAbortController.current = null;
     }
+  };
+
+  const cancelStoryGeneration = () => {
+      if (storyAbortController.current) {
+          storyAbortController.current.abort();
+          setIsStoryGenerating(false);
+      }
   };
 
   const handleRetry = () => {
@@ -812,6 +855,13 @@ ${activePrompt}`;
   const handleBrainstorm = async () => {
     if (!brainstormInput.trim()) return;
     
+    // Abort previous
+    if (brainstormAbortController.current) {
+        brainstormAbortController.current.abort();
+    }
+    const ac = new AbortController();
+    brainstormAbortController.current = ac;
+
     const context = getBrainstormContext();
     // Prep User Instruction (Template)
     const userInstruction = parseTemplate(brainstormConfig.instruction, book, activeChapter);
@@ -823,7 +873,7 @@ ${activePrompt}`;
     const newHistory = [...brainstormMessages, userMsg];
     setBrainstormMessages(newHistory);
     setBrainstormInput('');
-    setIsGenerating(true);
+    setIsBrainstormGenerating(true);
     setErrorState(null);
 
     const config = getRuntimeConfig(brainstormConfig.provider, brainstormConfig.model);
@@ -836,15 +886,25 @@ ${activePrompt}`;
           finalPrompt, // prompt argument
           systemRole, 
           config, 
-          brainstormMessages 
+          brainstormMessages,
+          ac.signal
       );
       
       setBrainstormMessages([...newHistory, { role: 'model', content: result }]);
-    } catch (e) {
+    } catch (e: any) {
+       if (e.name === 'AbortError') return;
        handleError(e);
     } finally {
-      setIsGenerating(false);
+      setIsBrainstormGenerating(false);
+      brainstormAbortController.current = null;
     }
+  };
+
+  const cancelBrainstorm = () => {
+      if (brainstormAbortController.current) {
+          brainstormAbortController.current.abort();
+          setIsBrainstormGenerating(false);
+      }
   };
 
   const handleBrainstormRetry = async () => {
@@ -852,6 +912,13 @@ ${activePrompt}`;
     const lastMsg = brainstormMessages[brainstormMessages.length - 1];
     if (lastMsg.role !== 'model') return;
     
+    // Abort previous
+    if (brainstormAbortController.current) {
+        brainstormAbortController.current.abort();
+    }
+    const ac = new AbortController();
+    brainstormAbortController.current = ac;
+
     const historyForUI = brainstormMessages.slice(0, -1);
     const userMsg = historyForUI[historyForUI.length - 1];
     
@@ -865,7 +932,7 @@ ${activePrompt}`;
     const userInstruction = parseTemplate(brainstormConfig.instruction, book, activeChapter);
     const finalPrompt = `${userInstruction}\n\n${context ? `CONTEXT:\n${context}\n\n` : ''}USER QUESTION: ${userMsg.content}`;
 
-    setIsGenerating(true);
+    setIsBrainstormGenerating(true);
     setErrorState(null);
     const config = getRuntimeConfig(brainstormConfig.provider, brainstormConfig.model);
     const systemRole = brainstormConfig.systemRole;
@@ -875,13 +942,16 @@ ${activePrompt}`;
           finalPrompt,
           systemRole,
           config,
-          historyForAPI
+          historyForAPI,
+          ac.signal
       );
       setBrainstormMessages([...historyForUI, { role: 'model', content: result }]);
-    } catch (e) {
+    } catch (e: any) {
+       if (e.name === 'AbortError') return;
        handleError(e);
     } finally {
-      setIsGenerating(false);
+      setIsBrainstormGenerating(false);
+      brainstormAbortController.current = null;
     }
   };
 
@@ -1046,8 +1116,12 @@ ${activePrompt}`;
                 <div className="flex gap-2 items-start">
                     <textarea className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 resize-none h-14 custom-scrollbar" placeholder="Ask for ideas..." value={brainstormInput} onChange={(e) => setBrainstormInput(e.target.value)} onKeyDown={(e) => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleBrainstorm(); }}} />
                     <div className="flex flex-col gap-1">
-                        <button onClick={handleBrainstorm} disabled={isGenerating} className={`h-8 w-8 rounded flex items-center justify-center transition-colors ${isGenerating ? 'bg-slate-800 text-slate-500' : 'bg-indigo-600 hover:bg-indigo-500 text-white'}`}><Send size={14} /></button>
-                        {brainstormMessages.length > 0 && brainstormMessages[brainstormMessages.length - 1].role === 'model' && !isGenerating && (
+                        {isBrainstormGenerating ? (
+                             <button onClick={cancelBrainstorm} className="h-8 w-8 rounded flex items-center justify-center transition-colors bg-red-600 hover:bg-red-500 text-white" title="Stop"><Square size={12} fill="currentColor" /></button>
+                        ) : (
+                             <button onClick={handleBrainstorm} className="h-8 w-8 rounded flex items-center justify-center transition-colors bg-indigo-600 hover:bg-indigo-500 text-white"><Send size={14} /></button>
+                        )}
+                        {brainstormMessages.length > 0 && brainstormMessages[brainstormMessages.length - 1].role === 'model' && !isBrainstormGenerating && (
                             <button onClick={handleBrainstormRetry} className="h-6 w-8 flex items-center justify-center text-orange-400 hover:bg-slate-900 rounded" title="Retry"><RotateCcw size={12} /></button>
                         )}
                     </div>
@@ -1144,13 +1218,21 @@ ${activePrompt}`;
                         </div>
 
                         {/* Generate Button */}
-                        <button 
-                            onClick={() => handleGenerateSuggestions()}
-                            disabled={isGeneratingSuggestions}
-                            className={`w-full py-2 rounded text-xs font-bold uppercase tracking-wide transition-colors flex items-center justify-center gap-2 ${isGeneratingSuggestions ? 'bg-slate-800 text-slate-500' : 'bg-indigo-600 hover:bg-indigo-500 text-white'}`}
-                        >
-                             <Sparkles size={14} className={isGeneratingSuggestions ? "animate-spin" : ""} /> {isGeneratingSuggestions ? 'Generating...' : 'Generate Ideas'}
-                        </button>
+                        {isGeneratingSuggestions ? (
+                             <button 
+                                onClick={cancelSuggestions}
+                                className="w-full py-2 rounded text-xs font-bold uppercase tracking-wide transition-colors flex items-center justify-center gap-2 bg-red-600 hover:bg-red-500 text-white"
+                             >
+                                 <Square size={14} fill="currentColor" /> Cancel
+                             </button>
+                        ) : (
+                             <button 
+                                onClick={() => handleGenerateSuggestions()}
+                                className="w-full py-2 rounded text-xs font-bold uppercase tracking-wide transition-colors flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white"
+                             >
+                                 <Sparkles size={14} /> Generate Ideas
+                             </button>
+                        )}
                     </div>
                 </div>
             )}
@@ -1181,13 +1263,17 @@ ${activePrompt}`;
                     <button onClick={() => openEditPromptKindModal(selectedKindId)} className="p-1 text-slate-500 hover:text-indigo-400" title="Edit Prompt Settings"><Edit2 size={14} /></button>
                      <button onClick={openNewPromptKindModal} className="p-1 text-slate-500 hover:text-indigo-400" title="New Prompt Kind"><Plus size={14} /></button>
                     <div className="flex-1" />
-                    {isGenerating && <span className="text-xs text-indigo-400 animate-pulse">Writing...</span>}
+                    {isStoryGenerating && <span className="text-xs text-indigo-400 animate-pulse">Writing...</span>}
                  </div>
                  <div className="flex gap-2 h-full">
                     <textarea className="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-3 resize-none text-sm outline-none focus:border-indigo-500/50 transition-colors" placeholder="Prompt instruction..." value={promptInput} onChange={(e) => setPromptInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); generateStory(); }}}/>
                     <div className="flex flex-col gap-2">
-                        <button onClick={() => generateStory()} disabled={isGenerating} className={`h-10 w-12 rounded-lg flex items-center justify-center transition-colors ${isGenerating ? 'bg-slate-800 text-slate-500' : 'bg-indigo-600 hover:bg-indigo-500 text-white'}`}><Send size={20} /></button>
-                        {lastGeneration && !isGenerating && (
+                        {isStoryGenerating ? (
+                             <button onClick={cancelStoryGeneration} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-red-600 hover:bg-red-500 text-white" title="Stop"><Square size={20} fill="currentColor" /></button>
+                        ) : (
+                             <button onClick={() => generateStory()} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-indigo-600 hover:bg-indigo-500 text-white"><Send size={20} /></button>
+                        )}
+                        {lastGeneration && !isStoryGenerating && (
                             <button onClick={handleRetry} className="flex flex-col items-center justify-center text-orange-400 hover:text-orange-300 transition-colors p-1" title="Retry"><RotateCcw size={16} /><span className="text-[10px] font-bold mt-0.5">Retry</span></button>
                         )}
                     </div>
@@ -1527,7 +1613,7 @@ ${activePrompt}`;
                                             className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
                                             value={suggestionConfig.instruction}
                                             onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, instruction: e.target.value}, providerConfigs)}
-                                            placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}"
+                                            placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}, {globalCodex}"
                                         />
                                     </div>
                                 </div>
