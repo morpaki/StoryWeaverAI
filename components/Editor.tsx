@@ -1,8 +1,9 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig, SuggestionConfig } from '../types';
 import { 
   ArrowLeft, Plus, Save, Send, Sparkles, Settings, BookOpen, 
-  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, PanelRight, Search, Lightbulb, Check, ChevronUp
+  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, PanelRight, Search, Lightbulb, Check, ChevronUp, Undo2
 } from 'lucide-react';
 import { LLMService } from '../services/llmService';
 
@@ -556,18 +557,67 @@ ${instruction}
           const responseText = await LLMService.generateCompletion(fullPrompt, systemRole, config, [], ac.signal);
 
           // Attempt Parsing JSON
-          let parsedData = [];
-          try {
-              // Extract JSON array if embedded in Markdown
-              const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-              const jsonStr = jsonMatch ? jsonMatch[0] : responseText;
-              parsedData = JSON.parse(jsonStr);
-          } catch (e) {
-              console.error("JSON Parsing failed", e);
-              throw new Error("Failed to parse suggestions from LLM response.");
+          let parsedData: any[] = [];
+          const cleanText = responseText.trim();
+          
+          // 1. Strategy: Try explicit JSON Array [ ... ]
+          const jsonArrayMatch = cleanText.match(/\[[\s\S]*\]/);
+          if (jsonArrayMatch) {
+              try {
+                  parsedData = JSON.parse(jsonArrayMatch[0]);
+              } catch (e) {
+                  // ignore failure
+              }
           }
 
-          if (!Array.isArray(parsedData)) throw new Error("LLM response was not an array.");
+          // 2. Strategy: Fallback to Regex for malformed responses (e.g. { "k":"v", "k":"v" } or stream of objects)
+          if (!Array.isArray(parsedData) || parsedData.length === 0) {
+               const summaryRegex = /"suggestionSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+               const descRegex = /"suggestionDescription"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+               
+               const summaries: string[] = [];
+               const descriptions: string[] = [];
+               
+               let match;
+               while ((match = summaryRegex.exec(responseText)) !== null) {
+                   summaries.push(match[1]);
+               }
+               while ((match = descRegex.exec(responseText)) !== null) {
+                   descriptions.push(match[1]);
+               }
+               
+               if (summaries.length > 0) {
+                   parsedData = summaries.map((s, i) => {
+                       try {
+                           return {
+                               suggestionSummary: JSON.parse(`"${s}"`),
+                               suggestionDescription: descriptions[i] ? JSON.parse(`"${descriptions[i]}"`) : ""
+                           };
+                       } catch (e) {
+                           return {
+                               suggestionSummary: s,
+                               suggestionDescription: descriptions[i] || ""
+                           };
+                       }
+                   });
+               }
+          }
+
+          // 3. Strategy: Fallback to full parse (single object)
+          if (!Array.isArray(parsedData) || parsedData.length === 0) {
+               try {
+                   const obj = JSON.parse(cleanText);
+                   if (obj.suggestionSummary) {
+                       parsedData = [obj];
+                   }
+               } catch (e) {
+                   // ignore
+               }
+          }
+
+          if (!Array.isArray(parsedData) || parsedData.length === 0) {
+             throw new Error("Failed to parse suggestions from LLM response.");
+          }
 
           // Process Suggestions to auto-detect characters
           const finalSuggestions: GeneratedSuggestion[] = parsedData.map((s: any) => {
@@ -579,8 +629,23 @@ ${instruction}
               
               // Scan for other existing characters in book
               (book.characters || []).forEach(char => {
-                  if (textToCheck.toLowerCase().includes(char.name.toLowerCase()) || 
-                      char.aliases.some(a => textToCheck.toLowerCase().includes(a.toLowerCase()))) {
+                  // Detection is based on Name and Aliases (Triggers)
+                  // using word boundaries to avoid partial matches (e.g. 'Al' in 'Always')
+                  const triggers = [char.name, ...char.aliases].filter(t => t && t.trim().length > 0);
+                  
+                  const isMatch = triggers.some(trigger => {
+                      const escaped = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                      try {
+                          // Use word boundaries for cleaner matching
+                          // This handles "Tom" matching "Tom" but not "Tomato"
+                          return new RegExp(`\\b${escaped}\\b`, 'i').test(textToCheck);
+                      } catch (e) {
+                          // Fallback to simple includes if regex fails (rare)
+                          return textToCheck.toLowerCase().includes(trigger.toLowerCase());
+                      }
+                  });
+
+                  if (isMatch) {
                       detectedChars.set(char.id, char);
                   }
               });
@@ -807,6 +872,17 @@ ${activePrompt}`;
       updateChapter(activeChapter.id, { content: cleanContent });
       setPromptInput(lastGeneration.prompt);
       generateStory(lastGeneration.prompt, cleanContent);
+  };
+  
+  const handleRevert = () => {
+      if (!lastGeneration || !activeChapter) return;
+      const currentContent = activeChapter.content;
+      // Slice off the last response length
+      const cleanContent = currentContent.slice(0, -lastGeneration.responseLength);
+      
+      updateChapter(activeChapter.id, { content: cleanContent });
+      setPromptInput(lastGeneration.prompt);
+      setLastGeneration(null);
   };
 
   // --- Settings & Models Logic ---
@@ -1267,14 +1343,17 @@ ${activePrompt}`;
                  </div>
                  <div className="flex gap-2 h-full">
                     <textarea className="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-3 resize-none text-sm outline-none focus:border-indigo-500/50 transition-colors" placeholder="Prompt instruction..." value={promptInput} onChange={(e) => setPromptInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); generateStory(); }}}/>
-                    <div className="flex flex-col gap-2">
+                    <div className="flex flex-col gap-2 items-center">
                         {isStoryGenerating ? (
                              <button onClick={cancelStoryGeneration} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-red-600 hover:bg-red-500 text-white" title="Stop"><Square size={20} fill="currentColor" /></button>
                         ) : (
                              <button onClick={() => generateStory()} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-indigo-600 hover:bg-indigo-500 text-white"><Send size={20} /></button>
                         )}
                         {lastGeneration && !isStoryGenerating && (
-                            <button onClick={handleRetry} className="flex flex-col items-center justify-center text-orange-400 hover:text-orange-300 transition-colors p-1" title="Retry"><RotateCcw size={16} /><span className="text-[10px] font-bold mt-0.5">Retry</span></button>
+                            <div className="flex gap-1">
+                                <button onClick={handleRevert} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-indigo-400 transition-colors" title="Revert"><Undo2 size={14} /></button>
+                                <button onClick={handleRetry} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-orange-400 transition-colors" title="Retry"><RotateCcw size={14} /></button>
+                            </div>
                         )}
                     </div>
                  </div>
