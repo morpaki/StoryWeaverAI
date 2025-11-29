@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig, SuggestionConfig } from '../types';
 import { 
   ArrowLeft, Plus, Save, Send, Sparkles, Settings, BookOpen, 
@@ -213,12 +213,23 @@ export const Editor: React.FC<EditorProps> = ({
   const [settingsSelectedProvider, setSettingsSelectedProvider] = useState<LLMProvider>('google');
   const [isFetchingModels, setIsFetchingModels] = useState(false);
 
-  // Cancellation Refs
+  // Editor Refs
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const storyAbortController = useRef<AbortController | null>(null);
   const brainstormAbortController = useRef<AbortController | null>(null);
   const suggestionAbortController = useRef<AbortController | null>(null);
 
   const activeChapter = book.chapters.find(c => c.id === activeChapterId);
+
+  // Auto-resize textarea logic
+  useLayoutEffect(() => {
+    if (textareaRef.current) {
+      // Reset height to allow shrinking
+      textareaRef.current.style.height = 'auto';
+      // Set to scrollHeight to fit content
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+    }
+  }, [activeChapter?.content, activeChapterId]);
 
   // Initialize selected kind if promptKinds changes
   useEffect(() => {
@@ -1220,6 +1231,25 @@ ${activePrompt}`;
         prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
       );
   }
+  
+  // Prepare content for rendering with highlight
+  const getContentParts = () => {
+      if (!activeChapter) return { normal: '', highlight: '' };
+      
+      const content = activeChapter.content;
+      if (lastAction && (lastAction.type === 'story_gen' || lastAction.type === 'story_paste')) {
+          const len = lastAction.responseLength;
+          if (content.length >= len) {
+              return {
+                  normal: content.slice(0, content.length - len),
+                  highlight: content.slice(content.length - len)
+              };
+          }
+      }
+      return { normal: content, highlight: '' };
+  };
+  
+  const { normal: normalContent, highlight: highlightContent } = getContentParts();
 
   return (
     <div className="flex flex-col h-full bg-slate-950 text-slate-200 relative">
@@ -1477,15 +1507,31 @@ ${activePrompt}`;
                 {/* Writing Area */}
                 <div 
                     className="flex-1 overflow-y-auto custom-scrollbar flex justify-center bg-slate-950 cursor-text"
-                    onClick={() => document.getElementById('chapter-editor-textarea')?.focus()}
+                    onClick={() => textareaRef.current?.focus()}
                 >
-                    <div className="w-full max-w-3xl px-8 py-12 min-h-full">
+                    <div className="w-full max-w-3xl px-8 py-12 min-h-full relative">
+                        {/* Highlight Overlay */}
+                        <div 
+                            className="absolute inset-0 px-8 py-12 font-serif text-lg leading-loose whitespace-pre-wrap break-words pointer-events-none z-0 text-transparent select-none"
+                            aria-hidden="true"
+                        >
+                            {normalContent}
+                            <span className="bg-indigo-500/20 text-transparent rounded decoration-clone">{highlightContent}</span>
+                        </div>
+                        
+                        {/* Actual Editor */}
                         <textarea 
                             id="chapter-editor-textarea"
-                            className="w-full h-full bg-transparent resize-none outline-none text-lg leading-loose font-serif text-slate-300 placeholder-slate-700" 
+                            ref={textareaRef}
+                            className="relative z-10 w-full bg-transparent resize-none outline-none text-lg leading-loose font-serif text-slate-300 placeholder-slate-700 overflow-hidden" 
+                            style={{ minHeight: '100%' }}
                             placeholder="Start writing..." 
                             value={activeChapter.content} 
-                            onChange={(e) => updateChapter(activeChapter.id, { content: e.target.value })}
+                            onChange={(e) => {
+                                updateChapter(activeChapter.id, { content: e.target.value });
+                                // Clear highlight/last action on user manual input
+                                setLastAction(null);
+                            }}
                             spellCheck={false}
                         />
                     </div>
