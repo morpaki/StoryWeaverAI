@@ -2,6 +2,8 @@
 
 
 
+
+
 export interface CodexItem {
   id: string;
   title: string;
@@ -81,6 +83,14 @@ export interface SuggestionConfig {
   systemRole: string;
   instruction: string;
   count: number;
+  rephrase: {
+      systemRole: string;
+      instruction: string;
+  };
+  expand: {
+      systemRole: string;
+      instruction: string;
+  };
 }
 
 export type BrainstormContextType = 'none' | 'current_chapter' | 'all_summaries' | 'selected_summaries';

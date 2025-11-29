@@ -1,9 +1,8 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig, SuggestionConfig } from '../types';
 import { 
   ArrowLeft, Plus, Save, Send, Sparkles, Settings, BookOpen, 
-  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, PanelRight, Search, Lightbulb, Check, ChevronUp, Undo2
+  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, PanelRight, Search, Lightbulb, Check, ChevronUp, Undo2, Maximize2
 } from 'lucide-react';
 import { LLMService } from '../services/llmService';
 
@@ -46,6 +45,11 @@ interface GeneratedSuggestion {
     characters: Character[]; // Detected or selected characters
     isExpanded: boolean;
 }
+
+type LastAction = 
+  | { type: 'story_gen'; prompt: string; responseLength: number; kindId: string }
+  | { type: 'story_paste'; responseLength: number }
+  | { type: 'suggestion_mod'; suggestionId: string; previousDescription: string };
 
 // --- Custom Components ---
 
@@ -150,6 +154,7 @@ export const Editor: React.FC<EditorProps> = ({
   // Settings Modal State
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'general' | 'providers' | 'brainstorm' | 'suggestions' | 'summary'>('general');
+  const [suggestionSettingsTab, setSuggestionSettingsTab] = useState<'general' | 'rephrase' | 'expand'>('general');
 
   // Chat states
   const [brainstormMessages, setBrainstormMessages] = useState<Message[]>([]);
@@ -165,14 +170,15 @@ export const Editor: React.FC<EditorProps> = ({
   const [suggestionSelectedCharIds, setSuggestionSelectedCharIds] = useState<string[]>([]);
   const [isGeneratingSuggestions, setIsGeneratingSuggestions] = useState(false);
   const [autoGenerateSuggestions, setAutoGenerateSuggestions] = useState(false);
+  const [processingSuggestionId, setProcessingSuggestionId] = useState<string | null>(null);
 
   // Prompt State
   const [promptInput, setPromptInput] = useState('');
   const [selectedKindId, setSelectedKindId] = useState<string>(promptKinds[0]?.id || '');
   const [isStoryGenerating, setIsStoryGenerating] = useState(false);
 
-  // Retry State
-  const [lastGeneration, setLastGeneration] = useState<{ prompt: string; responseLength: number; kindId: string } | null>(null);
+  // Retry/Revert State
+  const [lastAction, setLastAction] = useState<LastAction | null>(null);
 
   // Error State
   const [errorState, setErrorState] = useState<{ short: string; full: string } | null>(null);
@@ -474,6 +480,30 @@ export const Editor: React.FC<EditorProps> = ({
 
   // --- Suggestion Logic ---
   
+  const detectCharacters = (text: string): Character[] => {
+      const detected = new Map<string, Character>();
+      (book.characters || []).forEach(char => {
+          // Detection is based on Name and Aliases (Triggers)
+          // using word boundaries to avoid partial matches (e.g. 'Al' in 'Always')
+          const triggers = [char.name, ...char.aliases].filter(t => t && t.trim().length > 0);
+          
+          const isMatch = triggers.some(trigger => {
+              const escaped = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              try {
+                  // Use word boundaries for cleaner matching
+                  return new RegExp(`\\b${escaped}\\b`, 'i').test(text);
+              } catch (e) {
+                  return text.toLowerCase().includes(trigger.toLowerCase());
+              }
+          });
+
+          if (isMatch) {
+              detected.set(char.id, char);
+          }
+      });
+      return Array.from(detected.values());
+  };
+
   const handleGenerateSuggestions = async (overrideContent?: string) => {
       if (suggestionAbortController.current) {
           suggestionAbortController.current.abort();
@@ -487,10 +517,10 @@ export const Editor: React.FC<EditorProps> = ({
       
       try {
           // Prepare Characters & Keywords text for template injection
-          const selectedChars = (book.characters || []).filter(c => suggestionSelectedCharIds.includes(c.id));
+          const manuallySelectedChars = (book.characters || []).filter(c => suggestionSelectedCharIds.includes(c.id));
           
-          const charDetailsText = selectedChars.length > 0 
-              ? selectedChars.map(c => `Name: ${c.name}\nDescription: ${c.description}`).join('\n\n')
+          const charDetailsText = manuallySelectedChars.length > 0 
+              ? manuallySelectedChars.map(c => `Name: ${c.name}\nDescription: ${c.description}`).join('\n\n')
               : "No specific characters required.";
               
           const keywordsText = suggestionKeywords.trim() ? suggestionKeywords : "No specific keywords provided.";
@@ -516,7 +546,6 @@ export const Editor: React.FC<EditorProps> = ({
           }
 
           // 2. Current Chapter Content (Last ~1500 words / ~9000 chars)
-          // Use overrideContent if provided, otherwise fallback to activeChapter.content
           let contentToUse = overrideContent;
           if (contentToUse === undefined && activeChapter) {
               contentToUse = activeChapter.content;
@@ -547,7 +576,6 @@ TASK:
 ${instruction}
 `;
           
-          // System Role is static persona
           const systemRole = suggestionConfig.systemRole;
 
           const config = getRuntimeConfig(suggestionConfig.provider, suggestionConfig.model, { 
@@ -560,7 +588,6 @@ ${instruction}
           let parsedData: any[] = [];
           const cleanText = responseText.trim();
           
-          // 1. Strategy: Try explicit JSON Array [ ... ]
           const jsonArrayMatch = cleanText.match(/\[[\s\S]*\]/);
           if (jsonArrayMatch) {
               try {
@@ -570,7 +597,6 @@ ${instruction}
               }
           }
 
-          // 2. Strategy: Fallback to Regex for malformed responses (e.g. { "k":"v", "k":"v" } or stream of objects)
           if (!Array.isArray(parsedData) || parsedData.length === 0) {
                const summaryRegex = /"suggestionSummary"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
                const descRegex = /"suggestionDescription"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
@@ -603,7 +629,6 @@ ${instruction}
                }
           }
 
-          // 3. Strategy: Fallback to full parse (single object)
           if (!Array.isArray(parsedData) || parsedData.length === 0) {
                try {
                    const obj = JSON.parse(cleanText);
@@ -625,30 +650,10 @@ ${instruction}
               
               // Start with manually selected characters
               const detectedChars = new Map<string, Character>();
-              selectedChars.forEach(c => detectedChars.set(c.id, c));
+              manuallySelectedChars.forEach(c => detectedChars.set(c.id, c));
               
-              // Scan for other existing characters in book
-              (book.characters || []).forEach(char => {
-                  // Detection is based on Name and Aliases (Triggers)
-                  // using word boundaries to avoid partial matches (e.g. 'Al' in 'Always')
-                  const triggers = [char.name, ...char.aliases].filter(t => t && t.trim().length > 0);
-                  
-                  const isMatch = triggers.some(trigger => {
-                      const escaped = trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                      try {
-                          // Use word boundaries for cleaner matching
-                          // This handles "Tom" matching "Tom" but not "Tomato"
-                          return new RegExp(`\\b${escaped}\\b`, 'i').test(textToCheck);
-                      } catch (e) {
-                          // Fallback to simple includes if regex fails (rare)
-                          return textToCheck.toLowerCase().includes(trigger.toLowerCase());
-                      }
-                  });
-
-                  if (isMatch) {
-                      detectedChars.set(char.id, char);
-                  }
-              });
+              const autoDetected = detectCharacters(textToCheck);
+              autoDetected.forEach(c => detectedChars.set(c.id, c));
 
               return {
                   id: crypto.randomUUID(),
@@ -836,9 +841,12 @@ ${activePrompt}`;
       const newContent = currentChapterContent + (currentChapterContent && result ? "\n\n" : "") + result;
       updateChapter(activeChapter.id, { content: newContent });
       
-      setLastGeneration({
+      const addedLength = result.length + (currentChapterContent && result ? 2 : 0);
+      
+      setLastAction({
+          type: 'story_gen',
           prompt: activePrompt,
-          responseLength: result.length + (currentChapterContent && result ? 2 : 0),
+          responseLength: addedLength,
           kindId: selectedKindId
       });
 
@@ -866,23 +874,42 @@ ${activePrompt}`;
   };
 
   const handleRetry = () => {
-      if (!lastGeneration || !activeChapter) return;
+      if (!lastAction || lastAction.type !== 'story_gen' || !activeChapter) return;
+      
       const currentContent = activeChapter.content;
-      const cleanContent = currentContent.slice(0, -lastGeneration.responseLength);
+      const cleanContent = currentContent.slice(0, -lastAction.responseLength);
       updateChapter(activeChapter.id, { content: cleanContent });
-      setPromptInput(lastGeneration.prompt);
-      generateStory(lastGeneration.prompt, cleanContent);
+      
+      setPromptInput(lastAction.prompt);
+      generateStory(lastAction.prompt, cleanContent);
   };
   
   const handleRevert = () => {
-      if (!lastGeneration || !activeChapter) return;
-      const currentContent = activeChapter.content;
-      // Slice off the last response length
-      const cleanContent = currentContent.slice(0, -lastGeneration.responseLength);
-      
-      updateChapter(activeChapter.id, { content: cleanContent });
-      setPromptInput(lastGeneration.prompt);
-      setLastGeneration(null);
+      if (!lastAction) return;
+
+      if (lastAction.type === 'story_gen' || lastAction.type === 'story_paste') {
+          if (!activeChapter) return;
+          const currentContent = activeChapter.content;
+          const cleanContent = currentContent.slice(0, -lastAction.responseLength);
+          updateChapter(activeChapter.id, { content: cleanContent });
+          
+          if (lastAction.type === 'story_gen') {
+             setPromptInput(lastAction.prompt);
+          }
+          setLastAction(null);
+      } else if (lastAction.type === 'suggestion_mod') {
+          setGeneratedSuggestions(prev => prev.map(s => {
+              if (s.id === lastAction.suggestionId) {
+                  // Revert description and re-run simple detection to ensure consistent state
+                  const restoredDesc = lastAction.previousDescription;
+                  // We'll just assume the characters from before were adequate or re-detect based on text
+                  const detected = detectCharacters(restoredDesc);
+                  return { ...s, suggestionDescription: restoredDesc, characters: detected };
+              }
+              return s;
+          }));
+          setLastAction(null);
+      }
   };
 
   // --- Settings & Models Logic ---
@@ -1032,11 +1059,103 @@ ${activePrompt}`;
   };
 
   const handleApplySuggestion = (suggestion: GeneratedSuggestion) => {
-      generateStory(suggestion.suggestionDescription);
+      if (!activeChapter) return;
+      const content = activeChapter.content;
+      // Just paste text instead of generating
+      const textToPaste = suggestion.suggestionDescription;
+      const newContent = content + (content ? "\n\n" : "") + textToPaste;
+      const addedLength = textToPaste.length + (content ? 2 : 0);
+
+      updateChapter(activeChapter.id, { content: newContent });
       
+      setLastAction({
+          type: 'story_paste',
+          responseLength: addedLength
+      });
+
       setGeneratedSuggestions([]);
       setSuggestionKeywords('');
       setSuggestionSelectedCharIds([]);
+  };
+
+  // Helper to compile context for Expand/Rephrase
+  const getSuggestionContext = (chars: Character[]) => {
+      const charText = chars.length > 0 
+          ? chars.map(c => `Name: ${c.name}\nDescription: ${c.description}`).join('\n\n')
+          : "No specific characters.";
+      
+      const globalCodexItems = book.codex.filter(item => item.isGlobal);
+      const globalCodexText = globalCodexItems.length > 0 
+          ? globalCodexItems.map(c => `[${c.title}]: ${c.content}`).join('\n\n') 
+          : "No global world context.";
+
+      return { charText, globalCodexText };
+  }
+
+  const handleRephraseSuggestion = async (suggestion: GeneratedSuggestion, e: React.MouseEvent) => {
+      e.stopPropagation();
+      setProcessingSuggestionId(suggestion.id);
+      const previousDesc = suggestion.suggestionDescription;
+      
+      try {
+          // Detect characters in the *current* suggestion description to be up-to-date
+          const currentChars = detectCharacters(suggestion.suggestionDescription);
+          const { charText, globalCodexText } = getSuggestionContext(currentChars);
+          
+          let instruction = suggestionConfig.rephrase?.instruction || "Rewrite text: {text}";
+          instruction = instruction
+             .replace('{characters}', charText)
+             .replace('{globalCodex}', globalCodexText)
+             .replace('{text}', suggestion.suggestionDescription);
+          
+          const systemRole = suggestionConfig.rephrase?.systemRole || "Rewrite text.";
+          const config = getRuntimeConfig(suggestionConfig.provider, suggestionConfig.model);
+
+          const result = await LLMService.generateCompletion(instruction, systemRole, config);
+          
+          setGeneratedSuggestions(prev => prev.map(s => 
+             s.id === suggestion.id ? { ...s, suggestionDescription: result, characters: currentChars } : s
+          ));
+          setLastAction({ type: 'suggestion_mod', suggestionId: suggestion.id, previousDescription: previousDesc });
+
+      } catch (err) {
+          handleError(err);
+      } finally {
+          setProcessingSuggestionId(null);
+      }
+  };
+
+  const handleExpandSuggestion = async (suggestion: GeneratedSuggestion, e: React.MouseEvent) => {
+      e.stopPropagation();
+      setProcessingSuggestionId(suggestion.id);
+      const previousDesc = suggestion.suggestionDescription;
+
+      try {
+          // Detect characters in the *current* suggestion description to be up-to-date
+          const currentChars = detectCharacters(suggestion.suggestionDescription);
+          const { charText, globalCodexText } = getSuggestionContext(currentChars);
+          
+          let instruction = suggestionConfig.expand?.instruction || "Expand text: {text}";
+          instruction = instruction
+             .replace('{characters}', charText)
+             .replace('{globalCodex}', globalCodexText)
+             .replace('{text}', suggestion.suggestionDescription);
+          
+          const systemRole = suggestionConfig.expand?.systemRole || "Expand text.";
+          const config = getRuntimeConfig(suggestionConfig.provider, suggestionConfig.model);
+
+          const result = await LLMService.generateCompletion(instruction, systemRole, config);
+          
+          setGeneratedSuggestions(prev => prev.map(s => 
+             s.id === suggestion.id ? { ...s, suggestionDescription: result, characters: currentChars } : s
+          ));
+          setLastAction({ type: 'suggestion_mod', suggestionId: suggestion.id, previousDescription: previousDesc });
+
+      } catch (err) {
+          handleError(err);
+      } finally {
+          setProcessingSuggestionId(null);
+      }
   };
 
   const toggleSuggestionExpand = (id: string) => {
@@ -1215,7 +1334,12 @@ ${activePrompt}`;
                              </div>
                         )}
                         {generatedSuggestions.map(s => (
-                            <div key={s.id} className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden group">
+                            <div key={s.id} className="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden group relative">
+                                {processingSuggestionId === s.id && (
+                                    <div className="absolute inset-0 bg-slate-950/60 z-10 flex items-center justify-center">
+                                        <RefreshCw size={24} className="animate-spin text-indigo-400"/>
+                                    </div>
+                                )}
                                 <div className="p-3 cursor-pointer hover:bg-slate-800/50 transition-colors" onClick={() => toggleSuggestionExpand(s.id)}>
                                     <div className="flex justify-between items-start gap-2">
                                         <div className="text-sm font-medium text-slate-200">{s.suggestionSummary}</div>
@@ -1232,12 +1356,28 @@ ${activePrompt}`;
                                 {s.isExpanded && (
                                     <div className="px-3 pb-3 pt-1 border-t border-slate-800/50 bg-slate-950/30">
                                         <p className="text-xs text-slate-400 mb-3 leading-relaxed whitespace-pre-wrap">{s.suggestionDescription}</p>
-                                        <button 
-                                            onClick={() => handleApplySuggestion(s)}
-                                            className="w-full flex items-center justify-center gap-2 bg-indigo-600/90 hover:bg-indigo-500 text-white text-xs py-1.5 rounded transition-colors"
-                                        >
-                                            <Check size={12} /> Apply to Story
-                                        </button>
+                                        <div className="flex gap-2">
+                                            <button 
+                                                onClick={() => handleApplySuggestion(s)}
+                                                className="flex-1 flex items-center justify-center gap-2 bg-indigo-600/90 hover:bg-indigo-500 text-white text-xs py-1.5 rounded transition-colors"
+                                            >
+                                                <Check size={12} /> Apply
+                                            </button>
+                                            <button 
+                                                onClick={(e) => handleRephraseSuggestion(s, e)}
+                                                className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-orange-400 text-xs px-3 py-1.5 rounded transition-colors"
+                                                title="Rephrase"
+                                            >
+                                                <RefreshCw size={12} /> Rephrase
+                                            </button>
+                                            <button 
+                                                onClick={(e) => handleExpandSuggestion(s, e)}
+                                                className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-green-400 text-xs px-3 py-1.5 rounded transition-colors"
+                                                title="Expand"
+                                            >
+                                                <Maximize2 size={12} /> Expand
+                                            </button>
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -1317,50 +1457,85 @@ ${activePrompt}`;
         </div>
 
         {/* CENTER PANEL */}
-        <div className="flex-1 flex flex-col min-w-0 bg-slate-950">
+        <div className="flex-1 flex flex-col min-w-0 bg-slate-950 relative">
           {activeChapter ? (
             <>
-              <div className="h-[75%] flex flex-col">
-                <div className="flex items-center justify-between px-6 py-2 bg-slate-900/50">
-                  <h3 className="text-sm font-bold text-slate-400 tracking-wide uppercase">{activeChapter.title}</h3>
-                  <div className="text-xs text-slate-600">{activeChapter.content.length} chars</div>
+              {/* Editor Section */}
+              <div className="flex-1 flex flex-col min-h-0 relative">
+                 {/* Header */}
+                <div className="flex items-center justify-between px-6 py-2 bg-slate-900 border-b border-slate-800 shrink-0 z-10">
+                  <div className="flex items-center gap-4">
+                      <h3 className="text-sm font-bold text-slate-300 tracking-wide uppercase">{activeChapter.title}</h3>
+                      <div className="h-4 w-px bg-slate-700/50" />
+                      <div className="flex gap-3 text-xs text-slate-500 font-mono">
+                          <span>{activeChapter.content.length} chars</span>
+                          <span>{activeChapter.content.trim().split(/\s+/).filter(Boolean).length} words</span>
+                      </div>
+                  </div>
                 </div>
-                <textarea className="flex-1 w-full bg-slate-950 p-8 resize-none outline-none text-lg leading-relaxed font-serif text-slate-300 placeholder-slate-700" placeholder="Start writing..." value={activeChapter.content} onChange={(e) => updateChapter(activeChapter.id, { content: e.target.value })}/>
+                
+                {/* Writing Area */}
+                <div 
+                    className="flex-1 overflow-y-auto custom-scrollbar flex justify-center bg-slate-950 cursor-text"
+                    onClick={() => document.getElementById('chapter-editor-textarea')?.focus()}
+                >
+                    <div className="w-full max-w-3xl px-8 py-12 min-h-full">
+                        <textarea 
+                            id="chapter-editor-textarea"
+                            className="w-full h-full bg-transparent resize-none outline-none text-lg leading-loose font-serif text-slate-300 placeholder-slate-700" 
+                            placeholder="Start writing..." 
+                            value={activeChapter.content} 
+                            onChange={(e) => updateChapter(activeChapter.id, { content: e.target.value })}
+                            spellCheck={false}
+                        />
+                    </div>
+                </div>
               </div>
-              <div className="h-[25%] border-t border-slate-800 bg-slate-900 p-3 flex flex-col">
-                 <div className="flex items-center gap-3 mb-2">
-                    <Sparkles size={16} className="text-indigo-400" />
-                    <div className="relative flex items-center gap-1">
-                        <select value={selectedKindId} onChange={(e) => setSelectedKindId(e.target.value)} className="bg-slate-950 border border-slate-700 text-xs text-slate-300 rounded px-2 py-1 outline-none focus:border-indigo-500 appearance-none pr-8 min-w-[150px]">
-                            {promptKinds.map(k => <option key={k.id} value={k.id}>{k.name}</option>)}
-                        </select>
-                        <div className="absolute right-2 pointer-events-none text-slate-500"><MoreHorizontal size={12} /></div>
-                    </div>
-                    <button onClick={() => openEditPromptKindModal(selectedKindId)} className="p-1 text-slate-500 hover:text-indigo-400" title="Edit Prompt Settings"><Edit2 size={14} /></button>
-                     <button onClick={openNewPromptKindModal} className="p-1 text-slate-500 hover:text-indigo-400" title="New Prompt Kind"><Plus size={14} /></button>
-                    <div className="flex-1" />
-                    {isStoryGenerating && <span className="text-xs text-indigo-400 animate-pulse">Writing...</span>}
-                 </div>
-                 <div className="flex gap-2 h-full">
-                    <textarea className="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-3 resize-none text-sm outline-none focus:border-indigo-500/50 transition-colors" placeholder="Prompt instruction..." value={promptInput} onChange={(e) => setPromptInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); generateStory(); }}}/>
-                    <div className="flex flex-col gap-2 items-center">
-                        {isStoryGenerating ? (
-                             <button onClick={cancelStoryGeneration} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-red-600 hover:bg-red-500 text-white" title="Stop"><Square size={20} fill="currentColor" /></button>
-                        ) : (
-                             <button onClick={() => generateStory()} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-indigo-600 hover:bg-indigo-500 text-white"><Send size={20} /></button>
-                        )}
-                        {lastGeneration && !isStoryGenerating && (
-                            <div className="flex gap-1">
-                                <button onClick={handleRevert} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-indigo-400 transition-colors" title="Revert"><Undo2 size={14} /></button>
-                                <button onClick={handleRetry} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-orange-400 transition-colors" title="Retry"><RotateCcw size={14} /></button>
-                            </div>
-                        )}
-                    </div>
+
+              {/* Controls/Prompt Section */}
+              <div className="h-[25%] min-h-[200px] border-t border-slate-800 bg-slate-900 flex flex-col shadow-2xl z-20">
+                 <div className="max-w-4xl w-full mx-auto h-full p-4 flex flex-col">
+                     <div className="flex items-center gap-3 mb-2 shrink-0">
+                        <Sparkles size={16} className="text-indigo-400" />
+                        <div className="relative flex items-center gap-1">
+                            <select value={selectedKindId} onChange={(e) => setSelectedKindId(e.target.value)} className="bg-slate-950 border border-slate-700 text-xs text-slate-300 rounded px-2 py-1 outline-none focus:border-indigo-500 appearance-none pr-8 min-w-[150px]">
+                                {promptKinds.map(k => <option key={k.id} value={k.id}>{k.name}</option>)}
+                            </select>
+                            <div className="absolute right-2 pointer-events-none text-slate-500"><MoreHorizontal size={12} /></div>
+                        </div>
+                        <button onClick={() => openEditPromptKindModal(selectedKindId)} className="p-1 text-slate-500 hover:text-indigo-400" title="Edit Prompt Settings"><Edit2 size={14} /></button>
+                         <button onClick={openNewPromptKindModal} className="p-1 text-slate-500 hover:text-indigo-400" title="New Prompt Kind"><Plus size={14} /></button>
+                        <div className="flex-1" />
+                        {isStoryGenerating && <span className="text-xs text-indigo-400 animate-pulse">Writing...</span>}
+                     </div>
+                     <div className="flex gap-2 flex-1 min-h-0">
+                        <textarea className="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-3 resize-none text-sm outline-none focus:border-indigo-500/50 transition-colors" placeholder="Prompt instruction..." value={promptInput} onChange={(e) => setPromptInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); generateStory(); }}}/>
+                        <div className="flex flex-col gap-2 items-center">
+                            {isStoryGenerating ? (
+                                 <button onClick={cancelStoryGeneration} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-red-600 hover:bg-red-500 text-white" title="Stop"><Square size={20} fill="currentColor" /></button>
+                            ) : (
+                                 <button onClick={() => generateStory()} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-indigo-600 hover:bg-indigo-500 text-white"><Send size={20} /></button>
+                            )}
+                            {lastAction && !isStoryGenerating && (
+                                <div className="flex gap-1">
+                                    <button onClick={handleRevert} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-indigo-400 transition-colors" title="Undo Last Action"><Undo2 size={14} /></button>
+                                    {lastAction.type === 'story_gen' && (
+                                        <button onClick={handleRetry} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-orange-400 transition-colors" title="Retry Generation"><RotateCcw size={14} /></button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                     </div>
                  </div>
               </div>
             </>
           ) : (
-            <div className="flex-1 flex items-center justify-center text-slate-600">Select or create a chapter to start writing.</div>
+            <div className="flex-1 flex items-center justify-center text-slate-600">
+                <div className="text-center">
+                    <BookOpen size={48} className="mx-auto mb-4 opacity-20"/>
+                    <p>Select or create a chapter to start writing.</p>
+                </div>
+            </div>
           )}
         </div>
 
@@ -1641,60 +1816,115 @@ ${activePrompt}`;
                                 <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4 border-b border-slate-800 pb-2 flex items-center gap-2"><Lightbulb size={14}/> Suggestions Config</h4>
                                 
                                 <div className="space-y-3">
-                                    <div className="flex gap-4">
-                                         <div className="flex-1">
-                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
-                                            <select 
-                                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
-                                                value={suggestionConfig.provider}
-                                                onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, provider: e.target.value as LLMProvider}, providerConfigs)}
-                                            >
-                                                <option value="google">Google Gemini</option>
-                                                <option value="openrouter">OpenRouter</option>
-                                                <option value="lmstudio">LM Studio</option>
-                                                <option value="venice">Venice AI</option>
-                                            </select>
+                                    {/* Sub Navigation */}
+                                    <div className="flex gap-2 mb-4 border-b border-slate-800">
+                                        <button onClick={() => setSuggestionSettingsTab('general')} className={`pb-2 text-xs font-bold uppercase ${suggestionSettingsTab === 'general' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}>General Config</button>
+                                        <button onClick={() => setSuggestionSettingsTab('rephrase')} className={`pb-2 text-xs font-bold uppercase ${suggestionSettingsTab === 'rephrase' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}>Rephrase</button>
+                                        <button onClick={() => setSuggestionSettingsTab('expand')} className={`pb-2 text-xs font-bold uppercase ${suggestionSettingsTab === 'expand' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}>Expand</button>
+                                    </div>
+
+                                    {suggestionSettingsTab === 'general' && (
+                                        <div className="space-y-3 animate-in fade-in">
+                                            <div className="flex gap-4">
+                                                <div className="flex-1">
+                                                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
+                                                    <select 
+                                                        className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
+                                                        value={suggestionConfig.provider}
+                                                        onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, provider: e.target.value as LLMProvider}, providerConfigs)}
+                                                    >
+                                                        <option value="google">Google Gemini</option>
+                                                        <option value="openrouter">OpenRouter</option>
+                                                        <option value="lmstudio">LM Studio</option>
+                                                        <option value="venice">Venice AI</option>
+                                                    </select>
+                                                </div>
+                                                <div className="w-24">
+                                                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Count</label>
+                                                    <input 
+                                                        type="number"
+                                                        className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
+                                                        value={suggestionConfig.count}
+                                                        onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, count: parseInt(e.target.value) || 5}, providerConfigs)}
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <div>
+                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
+                                                <SearchableModelSelect 
+                                                    value={suggestionConfig.model}
+                                                    options={providerConfigs[suggestionConfig.provider]?.availableModels || []}
+                                                    onChange={(val) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, model: val}, providerConfigs)}
+                                                    placeholder="Select Model"
+                                                />
+                                            </div>
+
+                                            <div>
+                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Role (Persona & Format)</label>
+                                                <textarea 
+                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar font-mono text-xs"
+                                                    value={suggestionConfig.systemRole}
+                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, systemRole: e.target.value}, providerConfigs)}
+                                                    placeholder="You are a story plotter. Return JSON array..."
+                                                />
+                                            </div>
+
+                                            <div>
+                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Instruction Template (Context & Task)</label>
+                                                <textarea 
+                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                                    value={suggestionConfig.instruction}
+                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, instruction: e.target.value}, providerConfigs)}
+                                                    placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}, {globalCodex}"
+                                                />
+                                            </div>
                                         </div>
-                                        <div className="w-24">
-                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Count</label>
-                                            <input 
-                                                type="number"
-                                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
-                                                value={suggestionConfig.count}
-                                                onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, count: parseInt(e.target.value) || 5}, providerConfigs)}
-                                            />
+                                    )}
+
+                                    {suggestionSettingsTab === 'rephrase' && (
+                                        <div className="space-y-3 animate-in fade-in">
+                                            <div>
+                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Rephrase System Role</label>
+                                                <textarea 
+                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                                    value={suggestionConfig.rephrase?.systemRole || ''}
+                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, rephrase: { ...suggestionConfig.rephrase, systemRole: e.target.value }}, providerConfigs)}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Rephrase Instruction Template</label>
+                                                <textarea 
+                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                                    value={suggestionConfig.rephrase?.instruction || ''}
+                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, rephrase: { ...suggestionConfig.rephrase, instruction: e.target.value }}, providerConfigs)}
+                                                    placeholder="Variables: {text}, {characters}, {globalCodex}"
+                                                />
+                                            </div>
                                         </div>
-                                    </div>
+                                    )}
 
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
-                                        <SearchableModelSelect 
-                                            value={suggestionConfig.model}
-                                            options={providerConfigs[suggestionConfig.provider]?.availableModels || []}
-                                            onChange={(val) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, model: val}, providerConfigs)}
-                                            placeholder="Select Model"
-                                        />
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Role (Persona & Format)</label>
-                                        <textarea 
-                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar font-mono text-xs"
-                                            value={suggestionConfig.systemRole}
-                                            onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, systemRole: e.target.value}, providerConfigs)}
-                                            placeholder="You are a story plotter. Return JSON array..."
-                                        />
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Instruction Template (Context & Task)</label>
-                                        <textarea 
-                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                            value={suggestionConfig.instruction}
-                                            onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, instruction: e.target.value}, providerConfigs)}
-                                            placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}, {globalCodex}"
-                                        />
-                                    </div>
+                                    {suggestionSettingsTab === 'expand' && (
+                                        <div className="space-y-3 animate-in fade-in">
+                                            <div>
+                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Expand System Role</label>
+                                                <textarea 
+                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                                    value={suggestionConfig.expand?.systemRole || ''}
+                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, expand: { ...suggestionConfig.expand, systemRole: e.target.value }}, providerConfigs)}
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Expand Instruction Template</label>
+                                                <textarea 
+                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                                    value={suggestionConfig.expand?.instruction || ''}
+                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, expand: { ...suggestionConfig.expand, instruction: e.target.value }}, providerConfigs)}
+                                                    placeholder="Variables: {text}, {characters}, {globalCodex}"
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}
@@ -1755,28 +1985,6 @@ ${activePrompt}`;
                </div>
            </div>
        )}
-
-      {/* Summary Modal */}
-      {summaryModalChapterId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setSummaryModalChapterId(null)}>
-            <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[600px] max-w-[90vw] flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
-                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-850">
-                    <h3 className="font-bold text-slate-200 flex items-center gap-2"><FileText size={18} className="text-indigo-400"/> Chapter Summary</h3>
-                    <button onClick={() => setSummaryModalChapterId(null)} className="text-slate-500 hover:text-white"><X size={20} /></button>
-                </div>
-                <div className="p-4 flex-1 bg-slate-900">
-                    <textarea value={summaryEditText} onChange={(e) => setSummaryEditText(e.target.value)} className="w-full h-64 bg-slate-950 p-4 rounded border border-slate-800 outline-none focus:border-indigo-500 resize-none leading-relaxed text-slate-300" placeholder="Write a summary..."/>
-                </div>
-                <div className="p-4 border-t border-slate-800 flex justify-between items-center bg-slate-850">
-                    <button onClick={handleGenerateSummaryInModal} disabled={isGeneratingSummary} className={`flex items-center gap-2 text-sm font-medium px-3 py-2 rounded transition-colors ${isGeneratingSummary ? 'text-indigo-400 bg-indigo-500/10' : 'text-indigo-400 hover:bg-indigo-500/10 hover:text-indigo-300'}`}><Sparkles size={16} className={isGeneratingSummary ? "animate-pulse" : ""} /> {isGeneratingSummary ? 'Generating...' : 'Auto-Generate'}</button>
-                    <div className="flex gap-3">
-                        <button onClick={() => setSummaryModalChapterId(null)} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
-                        <button onClick={saveSummaryFromModal} className="px-6 py-2 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500 shadow-lg shadow-indigo-500/20 transition-all">Save Summary</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-      )}
 
        {/* Prompt Kind Editor Modal */}
        {isKindModalOpen && editingKind && (

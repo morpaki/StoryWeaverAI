@@ -58,7 +58,33 @@ GLOBAL CONTEXT (World Info):
 {globalCodex}
 
 ADDITIONAL KEYWORDS/ELEMENTS (Must be included):
-{keywords}`
+{keywords}`,
+    rephrase: {
+        systemRole: "You are a specialized editor. Rewrite the text to be punchier and more evocative while retaining the exact same meaning.",
+        instruction: `Rewrite the following plot outline.
+
+CONTEXT:
+{globalCodex}
+
+CHARACTERS INVOLVED:
+{characters}
+
+ORIGINAL TEXT:
+{text}`
+    },
+    expand: {
+        systemRole: "You are a creative writer. Flesh out the plot outline into a detailed beat sheet or scene description.",
+        instruction: `Expand the following plot outline into a detailed description (approx 150-200 words). Add sensory details and potential dialogue snippets.
+
+CONTEXT:
+{globalCodex}
+
+CHARACTERS INVOLVED:
+{characters}
+
+ORIGINAL TEXT:
+{text}`
+    }
 };
 
 const App: React.FC = () => {
@@ -128,6 +154,14 @@ const App: React.FC = () => {
              if (suggestionConfig.instruction.includes('{characters}') && suggestionConfig.instruction.includes('{keywords}')) {
                  suggestionConfig.instruction = DEFAULT_SUGGESTION_CONFIG.instruction;
              }
+        }
+
+        // Migration for Rephrase/Expand
+        if (!suggestionConfig.rephrase) {
+            suggestionConfig.rephrase = DEFAULT_SUGGESTION_CONFIG.rephrase;
+        }
+        if (!suggestionConfig.expand) {
+            suggestionConfig.expand = DEFAULT_SUGGESTION_CONFIG.expand;
         }
 
         // Migration: PromptKinds
