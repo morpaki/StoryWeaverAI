@@ -315,6 +315,16 @@ export const Editor: React.FC<EditorProps> = ({
         return targetChapter ? (targetChapter.summary || 'No summary available') : 'Chapter not found';
     });
 
+    // {storySoFar}
+    result = result.replace(/{storySoFar}/g, () => {
+        const sorted = [...currentBook.chapters].sort((a, b) => a.order - b.order);
+        const currentOrder = currentChapter ? currentChapter.order : (sorted.length > 0 ? sorted[sorted.length - 1].order + 1 : 0);
+        const prev = sorted.filter(c => c.order < currentOrder);
+        
+        if (prev.length === 0) return "No previous story context.";
+        return prev.map(c => `[${c.title}]: ${c.summary || 'No summary'}`).join('\n\n');
+    });
+
     return result;
   };
 
@@ -627,18 +637,32 @@ export const Editor: React.FC<EditorProps> = ({
               ? globalCodexItems.map(c => `[${c.title}]: ${c.content}`).join('\n\n') 
               : "No global world context.";
 
+          // Inject variables into User Instruction Template
+          // {storySoFar} is handled in parseTemplate, but we need to know if it was used to avoid duplicating context
+          let instruction = suggestionConfig.instruction
+              .replace('{count}', (suggestionConfig.count || 5).toString())
+              .replace('{characters}', charDetailsText)
+              .replace('{keywords}', keywordsText)
+              .replace('{globalCodex}', globalCodexText);
+              
+          instruction = parseTemplate(instruction, book, activeChapter);
+
           // Prepare Context for Prompt
           const contextParts: string[] = [];
 
-          // 1. Story So Far (Previous Chapter Summaries)
-          const sortedChapters = [...book.chapters].sort((a, b) => a.order - b.order);
-          const previousChapters = sortedChapters.filter(c => activeChapter && c.order < activeChapter.order);
-          if (previousChapters.length > 0) {
-             const summaries = previousChapters
-                .filter(c => c.summary && c.summary.trim())
-                .map(c => `Chapter: ${c.title}\nSummary: ${c.summary}`)
-                .join('\n\n');
-             if (summaries) contextParts.push(`STORY SO FAR:\n${summaries}`);
+          // 1. Story So Far (Previous Chapter Summaries) - Only add if NOT in instruction
+          const instructionIncludesStory = suggestionConfig.instruction.includes('{storySoFar}');
+          
+          if (!instructionIncludesStory) {
+              const sortedChapters = [...book.chapters].sort((a, b) => a.order - b.order);
+              const previousChapters = sortedChapters.filter(c => activeChapter && c.order < activeChapter.order);
+              if (previousChapters.length > 0) {
+                 const summaries = previousChapters
+                    .filter(c => c.summary && c.summary.trim())
+                    .map(c => `Chapter: ${c.title}\nSummary: ${c.summary}`)
+                    .join('\n\n');
+                 if (summaries) contextParts.push(`STORY SO FAR:\n${summaries}`);
+              }
           }
 
           // 2. Current Chapter Content (Last ~1500 words / ~9000 chars)
@@ -653,15 +677,6 @@ export const Editor: React.FC<EditorProps> = ({
               const slicedContent = content.length > sliceLength ? "..." + content.slice(-sliceLength) : content;
               contextParts.push(`CURRENT CHAPTER (Last ~1500 words):\n${slicedContent}`);
           }
-
-          // Inject variables into User Instruction Template
-          let instruction = suggestionConfig.instruction
-              .replace('{count}', (suggestionConfig.count || 5).toString())
-              .replace('{characters}', charDetailsText)
-              .replace('{keywords}', keywordsText)
-              .replace('{globalCodex}', globalCodexText);
-              
-          instruction = parseTemplate(instruction, book, activeChapter);
 
           // Construct the full prompt
           const fullPrompt = `
@@ -875,15 +890,18 @@ ${instruction}
     const contextBlocks: string[] = [];
 
     // Inject Story So Far
-    const sortedChapters = [...book.chapters].sort((a, b) => a.order - b.order);
-    const previousChapters = sortedChapters.filter(c => c.order < activeChapter.order);
-    const storySoFar = previousChapters
-        .filter(c => c.summary && c.summary.trim())
-        .map(c => `[${c.title}]: ${c.summary}`)
-        .join('\n');
-    
-    if (storySoFar) {
-        contextBlocks.push(`STORY SO FAR:\n${storySoFar}`);
+    // Check if the instruction already included it (via parseTemplate)
+    if (!selectedKind.instruction.includes('{storySoFar}')) {
+        const sortedChapters = [...book.chapters].sort((a, b) => a.order - b.order);
+        const previousChapters = sortedChapters.filter(c => c.order < activeChapter.order);
+        const storySoFar = previousChapters
+            .filter(c => c.summary && c.summary.trim())
+            .map(c => `[${c.title}]: ${c.summary}`)
+            .join('\n');
+        
+        if (storySoFar) {
+            contextBlocks.push(`STORY SO FAR:\n${storySoFar}`);
+        }
     }
 
     // Merge Codex and Characters
@@ -1204,6 +1222,8 @@ ${activePrompt}`;
              .replace('{globalCodex}', globalCodexText)
              .replace('{text}', suggestion.suggestionDescription);
           
+          instruction = parseTemplate(instruction, book, activeChapter);
+          
           const systemRole = suggestionConfig.rephrase?.systemRole || "Rewrite text.";
           const config = getRuntimeConfig(suggestionConfig.provider, suggestionConfig.model);
 
@@ -1236,6 +1256,8 @@ ${activePrompt}`;
              .replace('{characters}', charText)
              .replace('{globalCodex}', globalCodexText)
              .replace('{text}', suggestion.suggestionDescription);
+          
+          instruction = parseTemplate(instruction, book, activeChapter);
           
           const systemRole = suggestionConfig.expand?.systemRole || "Expand text.";
           const config = getRuntimeConfig(suggestionConfig.provider, suggestionConfig.model);
@@ -2064,7 +2086,7 @@ ${activePrompt}`;
                                                             className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
                                                             value={editingSuggestionModeData.instruction}
                                                             onChange={(e) => setEditingSuggestionModeData({...editingSuggestionModeData, instruction: e.target.value})}
-                                                            placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}, {globalCodex}"
+                                                            placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}, {globalCodex}, {storySoFar}"
                                                         />
                                                     </div>
                                                 </div>
@@ -2088,7 +2110,7 @@ ${activePrompt}`;
                                                     className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
                                                     value={suggestionConfig.rephrase?.instruction || ''}
                                                     onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, rephrase: { ...suggestionConfig.rephrase, instruction: e.target.value }}, providerConfigs)}
-                                                    placeholder="Variables: {text}, {characters}, {globalCodex}"
+                                                    placeholder="Variables: {text}, {characters}, {globalCodex}, {storySoFar}"
                                                 />
                                             </div>
                                         </div>
@@ -2110,7 +2132,7 @@ ${activePrompt}`;
                                                     className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
                                                     value={suggestionConfig.expand?.instruction || ''}
                                                     onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, expand: { ...suggestionConfig.expand, instruction: e.target.value }}, providerConfigs)}
-                                                    placeholder="Variables: {text}, {characters}, {globalCodex}"
+                                                    placeholder="Variables: {text}, {characters}, {globalCodex}, {storySoFar}"
                                                 />
                                             </div>
                                         </div>
@@ -2257,7 +2279,7 @@ ${activePrompt}`;
 
                     <div>
                         <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Instruction Template</label>
-                         <p className="text-[10px] text-slate-500 mb-1">Variables: &#123;currentChapter&#125;, &#123;pov&#125;, &#123;tense&#125;, &#123;chapterSummary:1&#125;, &#123;lastWords:500&#125;</p>
+                         <p className="text-[10px] text-slate-500 mb-1">Variables: &#123;currentChapter&#125;, &#123;pov&#125;, &#123;tense&#125;, &#123;chapterSummary:1&#125;, &#123;lastWords:500&#125;, &#123;storySoFar&#125;</p>
                         <textarea className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 font-mono leading-relaxed" value={editingKind.instruction} onChange={(e) => setEditingKind({...editingKind, instruction: e.target.value})}/>
                     </div>
                 </div>

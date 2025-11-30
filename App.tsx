@@ -47,7 +47,10 @@ Return ONLY a valid JSON array matching this structure:
 ]
 Do not add markdown formatting or explanations outside the JSON.`;
 
-const DEFAULT_SUGGESTION_INSTRUCTION = `Generate {count} distinct plot suggestions for the next scene based on the context.
+const DEFAULT_SUGGESTION_INSTRUCTION = `Generate {count} distinct plot suggestions for the next scene.
+
+STORY SO FAR:
+{storySoFar}
 
 REQUIRED CHARACTERS (Must be included):
 {characters}
@@ -72,6 +75,9 @@ const DEFAULT_SUGGESTION_CONFIG: SuggestionConfig = {
 CONTEXT:
 {globalCodex}
 
+STORY SO FAR:
+{storySoFar}
+
 CHARACTERS INVOLVED:
 {characters}
 
@@ -84,6 +90,9 @@ ORIGINAL TEXT:
 
 CONTEXT:
 {globalCodex}
+
+STORY SO FAR:
+{storySoFar}
 
 CHARACTERS INVOLVED:
 {characters}
@@ -113,6 +122,9 @@ Return ONLY a valid JSON array matching this structure:
 ]`,
         instruction: `Generate {count} suggestions for detailed character moments or emotional beats.
 
+Story So Far:
+{storySoFar}
+
 Context:
 {globalCodex}
 
@@ -134,6 +146,9 @@ Return ONLY a valid JSON array matching this structure:
   }
 ]`,
         instruction: `Generate {count} shocking plot twists or complications for the current situation.
+
+Story So Far:
+{storySoFar}
 
 Context:
 {globalCodex}
