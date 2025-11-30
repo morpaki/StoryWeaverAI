@@ -1,9 +1,4 @@
 
-
-
-
-
-
 export interface CodexItem {
   id: string;
   title: string;
@@ -76,6 +71,13 @@ export interface SummaryConfig {
   instruction: string;
 }
 
+export interface SuggestionMode {
+  id: string;
+  name: string;
+  systemRole: string;
+  instruction: string;
+}
+
 // Configuration for Story Suggestions
 export interface SuggestionConfig {
   provider: LLMProvider;
@@ -83,6 +85,7 @@ export interface SuggestionConfig {
   systemRole: string;
   instruction: string;
   count: number;
+  activeModeId?: string; // ID of the currently active SuggestionMode
   rephrase: {
       systemRole: string;
       instruction: string;
@@ -123,6 +126,9 @@ export interface AppState {
 
   // Active settings for Suggestions
   suggestionConfig: SuggestionConfig;
+  
+  // Available Suggestion Modes
+  suggestionModes: SuggestionMode[];
 
   // Global repository of settings per provider
   providerConfigs: ProviderConfigs;

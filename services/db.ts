@@ -1,12 +1,12 @@
 
-
-import { Book, BrainstormConfig, PromptKind, ProviderConfigs, SuggestionConfig, SummaryConfig } from '../types';
+import { Book, BrainstormConfig, PromptKind, ProviderConfigs, SuggestionConfig, SuggestionMode, SummaryConfig } from '../types';
 
 const DB_NAME = 'StoryWeaverDB';
-const DB_VERSION = 2; 
+const DB_VERSION = 3; 
 const STORE_BOOKS = 'books';
 const STORE_SETTINGS = 'settings';
 const STORE_PROMPT_KINDS = 'prompt_kinds';
+const STORE_SUGGESTION_MODES = 'suggestion_modes';
 
 export const db = {
   async open(): Promise<IDBDatabase> {
@@ -26,6 +26,9 @@ export const db = {
         }
         if (!db.objectStoreNames.contains(STORE_PROMPT_KINDS)) {
           db.createObjectStore(STORE_PROMPT_KINDS, { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains(STORE_SUGGESTION_MODES)) {
+          db.createObjectStore(STORE_SUGGESTION_MODES, { keyPath: 'id' });
         }
       };
     });
@@ -141,6 +144,43 @@ export const db = {
     return new Promise((resolve, reject) => {
         const transaction = db.transaction(STORE_PROMPT_KINDS, 'readwrite');
         const store = transaction.objectStore(STORE_PROMPT_KINDS);
+        const request = store.delete(id);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+  },
+
+  async getAllSuggestionModes(): Promise<SuggestionMode[]> {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+        if (!db.objectStoreNames.contains(STORE_SUGGESTION_MODES)) {
+            resolve([]);
+            return;
+        }
+        const transaction = db.transaction(STORE_SUGGESTION_MODES, 'readonly');
+        const store = transaction.objectStore(STORE_SUGGESTION_MODES);
+        const request = store.getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+  },
+
+  async saveSuggestionMode(mode: SuggestionMode): Promise<void> {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_SUGGESTION_MODES, 'readwrite');
+        const store = transaction.objectStore(STORE_SUGGESTION_MODES);
+        const request = store.put(mode);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+  },
+
+  async deleteSuggestionMode(id: string): Promise<void> {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_SUGGESTION_MODES, 'readwrite');
+        const store = transaction.objectStore(STORE_SUGGESTION_MODES);
         const request = store.delete(id);
         request.onsuccess = () => resolve();
         request.onerror = () => reject(request.error);

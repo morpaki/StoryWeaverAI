@@ -1,5 +1,6 @@
+
 import React, { useState, useEffect } from 'react';
-import { AppState, Book, BrainstormConfig, LLMConfig, PromptKind, ProviderConfigs, SuggestionConfig, SummaryConfig } from './types';
+import { AppState, Book, BrainstormConfig, LLMConfig, PromptKind, ProviderConfigs, SuggestionConfig, SuggestionMode, SummaryConfig } from './types';
 import { Library } from './components/Library';
 import { Editor } from './components/Editor';
 import { db } from './services/db';
@@ -36,11 +37,7 @@ const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
     instruction: 'Summarize the provided chapter content. Respond with exactly one paragraph of 3–5 sentences. Do not use bullet points or lists. Focus on key plot points and character developments.'
 };
 
-const DEFAULT_SUGGESTION_CONFIG: SuggestionConfig = {
-    provider: 'google',
-    model: 'gemini-2.5-flash',
-    count: 5,
-    systemRole: `You are a creative writing assistant. You help generate plot ideas. 
+const DEFAULT_SUGGESTION_SYSTEM_ROLE = `You are a creative writing assistant. You help generate plot ideas. 
 Return ONLY a valid JSON array matching this structure:
 [
   {
@@ -48,8 +45,9 @@ Return ONLY a valid JSON array matching this structure:
     "suggestionDescription": "Detailed description (max 5 sentences)."
   }
 ]
-Do not add markdown formatting or explanations outside the JSON.`,
-    instruction: `Generate {count} distinct plot suggestions for the next scene based on the context.
+Do not add markdown formatting or explanations outside the JSON.`;
+
+const DEFAULT_SUGGESTION_INSTRUCTION = `Generate {count} distinct plot suggestions for the next scene based on the context.
 
 REQUIRED CHARACTERS (Must be included):
 {characters}
@@ -58,7 +56,15 @@ GLOBAL CONTEXT (World Info):
 {globalCodex}
 
 ADDITIONAL KEYWORDS/ELEMENTS (Must be included):
-{keywords}`,
+{keywords}`;
+
+const DEFAULT_SUGGESTION_CONFIG: SuggestionConfig = {
+    provider: 'google',
+    model: 'gemini-2.5-flash',
+    count: 5,
+    systemRole: DEFAULT_SUGGESTION_SYSTEM_ROLE,
+    instruction: DEFAULT_SUGGESTION_INSTRUCTION,
+    activeModeId: 'mode_plot_dev',
     rephrase: {
         systemRole: "You are a specialized editor. Rewrite the text to be punchier and more evocative while retaining the exact same meaning.",
         instruction: `Rewrite the following plot outline.
@@ -87,6 +93,59 @@ ORIGINAL TEXT:
     }
 };
 
+const DEFAULT_SUGGESTION_MODES: SuggestionMode[] = [
+    {
+        id: 'mode_plot_dev',
+        name: 'Standard Plot',
+        systemRole: DEFAULT_SUGGESTION_SYSTEM_ROLE,
+        instruction: DEFAULT_SUGGESTION_INSTRUCTION
+    },
+    {
+        id: 'mode_character',
+        name: 'Character Focus',
+        systemRole: `You are a character psychology expert. Focus on emotional reactions, internal monologue opportunities, and relationship dynamics.
+Return ONLY a valid JSON array matching this structure:
+[
+  {
+    "suggestionSummary": "Focus: Character Name",
+    "suggestionDescription": "Detailed moment description."
+  }
+]`,
+        instruction: `Generate {count} suggestions for detailed character moments or emotional beats.
+
+Context:
+{globalCodex}
+
+Characters:
+{characters}
+
+Keywords:
+{keywords}`
+    },
+    {
+        id: 'mode_twist',
+        name: 'Plot Twists',
+        systemRole: `You are a master of suspense and plot twists. Suggest unexpected turns, secrets revealed, or sudden conflicts.
+Return ONLY a valid JSON array matching this structure:
+[
+  {
+    "suggestionSummary": "Twist: The reveal",
+    "suggestionDescription": "Description of the twist and immediate consequence."
+  }
+]`,
+        instruction: `Generate {count} shocking plot twists or complications for the current situation.
+
+Context:
+{globalCodex}
+
+Characters:
+{characters}
+
+Keywords:
+{keywords}`
+    }
+];
+
 const App: React.FC = () => {
   // --- State Initialization ---
   const [state, setState] = useState<AppState>({
@@ -97,6 +156,7 @@ const App: React.FC = () => {
     brainstormConfig: DEFAULT_BRAINSTORM_CONFIG,
     summaryConfig: DEFAULT_SUMMARY_CONFIG,
     suggestionConfig: DEFAULT_SUGGESTION_CONFIG,
+    suggestionModes: [],
     providerConfigs: DEFAULT_PROVIDER_CONFIGS,
     promptKinds: []
   });
@@ -110,6 +170,7 @@ const App: React.FC = () => {
         const dbBooks = await db.getAllBooks();
         const dbSettings = await db.getSettings();
         const dbPromptKinds = await db.getAllPromptKinds();
+        const dbSuggestionModes = await db.getAllSuggestionModes();
 
         // Prepare Data
         let promptKinds = dbPromptKinds as any[]; 
@@ -123,7 +184,7 @@ const App: React.FC = () => {
         let loadedProviders = dbSettings?.providers || DEFAULT_PROVIDER_CONFIGS;
         let providerConfigs = { ...DEFAULT_PROVIDER_CONFIGS, ...loadedProviders };
 
-        // --- Migration Logic for Split Instructions ---
+        // --- Migration Logic ---
 
         // Helper to migrate legacy single-field configs to new structure
         const migrateConfig = (conf: any, defaultRole: string, defaultInst: string) => {
@@ -141,22 +202,20 @@ const App: React.FC = () => {
         brainstormConfig = migrateConfig(brainstormConfig, DEFAULT_BRAINSTORM_CONFIG.systemRole, DEFAULT_BRAINSTORM_CONFIG.instruction);
         summaryConfig = migrateConfig(summaryConfig, DEFAULT_SUMMARY_CONFIG.systemRole, DEFAULT_SUMMARY_CONFIG.instruction);
         
-        // Special case for suggestion config to ensure templates are in user instruction
+        // Special case for suggestion config
         if (suggestionConfig.systemInstruction !== undefined && suggestionConfig.systemRole === undefined) {
              suggestionConfig = {
                  ...suggestionConfig,
                  systemRole: DEFAULT_SUGGESTION_CONFIG.systemRole,
-                 instruction: DEFAULT_SUGGESTION_CONFIG.instruction, // Force default instruction to ensure {characters} exists
+                 instruction: DEFAULT_SUGGESTION_CONFIG.instruction, 
                  systemInstruction: undefined
              };
         } else if (suggestionConfig.instruction && !suggestionConfig.instruction.includes('{globalCodex}')) {
-             // Migration to add {globalCodex} if missing from what looks like a default instruction
              if (suggestionConfig.instruction.includes('{characters}') && suggestionConfig.instruction.includes('{keywords}')) {
                  suggestionConfig.instruction = DEFAULT_SUGGESTION_CONFIG.instruction;
              }
         }
 
-        // Migration for Rephrase/Expand
         if (!suggestionConfig.rephrase) {
             suggestionConfig.rephrase = DEFAULT_SUGGESTION_CONFIG.rephrase;
         }
@@ -164,9 +223,23 @@ const App: React.FC = () => {
             suggestionConfig.expand = DEFAULT_SUGGESTION_CONFIG.expand;
         }
 
+        // Suggestion Modes Migration/Init
+        let suggestionModes = dbSuggestionModes;
+        if (suggestionModes.length === 0) {
+            // First time load or upgrade, save defaults
+            for (const mode of DEFAULT_SUGGESTION_MODES) {
+                await db.saveSuggestionMode(mode);
+            }
+            suggestionModes = DEFAULT_SUGGESTION_MODES;
+        }
+
+        // Ensure activeModeId is valid
+        if (!suggestionConfig.activeModeId || !suggestionModes.some(m => m.id === suggestionConfig.activeModeId)) {
+            suggestionConfig.activeModeId = suggestionModes[0].id;
+        }
+
         // Migration: PromptKinds
         const migratedPromptKinds: PromptKind[] = promptKinds.map((pk: any) => {
-             // 1. Handle very old format (nested config)
              let base = pk.config ? {
                  id: pk.id,
                  name: pk.name,
@@ -176,7 +249,6 @@ const App: React.FC = () => {
                  model: pk.config.modelName || 'gemini-2.5-flash',
              } : pk;
              
-             // 2. Handle split instruction migration
              if (base.systemInstruction !== undefined && base.systemRole === undefined) {
                  base = {
                      ...base,
@@ -186,7 +258,6 @@ const App: React.FC = () => {
                  };
              }
              
-             // 3. Ensure defaults for numeric fields
              return {
                  ...base,
                  maxTokens: base.maxTokens || 2048,
@@ -194,7 +265,6 @@ const App: React.FC = () => {
              } as PromptKind;
         });
 
-        // Ensure default prompt kind
         if (migratedPromptKinds.length === 0) {
             const defaultKind: PromptKind = {
                 id: 'default-story-continuation',
@@ -211,7 +281,6 @@ const App: React.FC = () => {
             migratedPromptKinds.push(defaultKind);
         }
 
-        // Migration: Ensure books have characters array and characters have image property, and POV/Tense
         const migratedBooks = dbBooks.map(b => ({
             ...b,
             pov: b.pov || '3rd Person Omniscient',
@@ -222,9 +291,7 @@ const App: React.FC = () => {
             }))
         }));
 
-        // Save migrated defaults if modified
         if (dbSettings) {
-             // Save back to DB to persist the split structure
              await db.saveSettings(brainstormConfig, summaryConfig, suggestionConfig, providerConfigs);
         }
 
@@ -234,6 +301,7 @@ const App: React.FC = () => {
             brainstormConfig: brainstormConfig,
             summaryConfig: summaryConfig,
             suggestionConfig: suggestionConfig,
+            suggestionModes: suggestionModes,
             providerConfigs: providerConfigs,
             promptKinds: migratedPromptKinds
         }));
@@ -317,6 +385,41 @@ const App: React.FC = () => {
       }
   };
 
+  const manageSuggestionModes = {
+      add: (mode: SuggestionMode) => {
+          db.saveSuggestionMode(mode).catch(console.error);
+          setState(prev => ({ ...prev, suggestionModes: [...prev.suggestionModes, mode] }));
+      },
+      update: (mode: SuggestionMode) => {
+          db.saveSuggestionMode(mode).catch(console.error);
+          setState(prev => {
+              const newModes = prev.suggestionModes.map(m => m.id === mode.id ? mode : m);
+              // Also update active config if this mode is selected
+              let newConfig = prev.suggestionConfig;
+              if (newConfig.activeModeId === mode.id) {
+                  newConfig = { ...newConfig, systemRole: mode.systemRole, instruction: mode.instruction };
+                  // save setting side effect
+                  db.saveSettings(prev.brainstormConfig, prev.summaryConfig, newConfig, prev.providerConfigs);
+              }
+              return { ...prev, suggestionModes: newModes, suggestionConfig: newConfig };
+          });
+      },
+      delete: (id: string) => {
+          db.deleteSuggestionMode(id).catch(console.error);
+          setState(prev => {
+              const newModes = prev.suggestionModes.filter(m => m.id !== id);
+              let newConfig = prev.suggestionConfig;
+              // Fallback if deleted active mode
+              if (newConfig.activeModeId === id && newModes.length > 0) {
+                  const fallback = newModes[0];
+                  newConfig = { ...newConfig, activeModeId: fallback.id, systemRole: fallback.systemRole, instruction: fallback.instruction };
+                  db.saveSettings(prev.brainstormConfig, prev.summaryConfig, newConfig, prev.providerConfigs);
+              }
+              return { ...prev, suggestionModes: newModes, suggestionConfig: newConfig };
+          });
+      }
+  };
+
   if (!isLoaded) {
     return <div className="h-screen w-screen bg-slate-950 flex items-center justify-center text-slate-500">Loading...</div>;
   }
@@ -336,6 +439,8 @@ const App: React.FC = () => {
           onUpdateSettings={updateSettings}
           promptKinds={state.promptKinds}
           onManagePromptKinds={managePromptKinds}
+          suggestionModes={state.suggestionModes}
+          onManageSuggestionModes={manageSuggestionModes}
         />
       );
     }

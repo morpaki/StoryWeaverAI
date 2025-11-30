@@ -1,8 +1,9 @@
+
 import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
-import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig, SuggestionConfig } from '../types';
+import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig, SuggestionConfig, SuggestionMode } from '../types';
 import { 
   ArrowLeft, Plus, Save, Send, Sparkles, Settings, BookOpen, 
-  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, PanelRight, Search, Lightbulb, Check, ChevronUp, Undo2, Maximize2
+  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, PanelRight, Search, Lightbulb, Check, ChevronUp, Undo2, Maximize2, Palette
 } from 'lucide-react';
 import { LLMService } from '../services/llmService';
 
@@ -21,6 +22,13 @@ interface EditorProps {
   onManagePromptKinds: {
       add: (kind: PromptKind) => void;
       update: (kind: PromptKind) => void;
+      delete: (id: string) => void;
+  };
+
+  suggestionModes: SuggestionMode[];
+  onManageSuggestionModes: {
+      add: (mode: SuggestionMode) => void;
+      update: (mode: SuggestionMode) => void;
       delete: (id: string) => void;
   };
 }
@@ -139,7 +147,9 @@ export const Editor: React.FC<EditorProps> = ({
   providerConfigs,
   onUpdateSettings,
   promptKinds,
-  onManagePromptKinds
+  onManagePromptKinds,
+  suggestionModes,
+  onManageSuggestionModes
 }) => {
   const [activeChapterId, setActiveChapterId] = useState<string | null>(
     book.chapters.length > 0 ? book.chapters[0].id : null
@@ -154,7 +164,11 @@ export const Editor: React.FC<EditorProps> = ({
   // Settings Modal State
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<'general' | 'providers' | 'brainstorm' | 'suggestions' | 'summary'>('general');
-  const [suggestionSettingsTab, setSuggestionSettingsTab] = useState<'general' | 'rephrase' | 'expand'>('general');
+  const [suggestionSettingsTab, setSuggestionSettingsTab] = useState<'mode' | 'rephrase' | 'expand'>('mode');
+  
+  // Suggestion Mode Editing State
+  const [editingSuggestionModeId, setEditingSuggestionModeId] = useState<string>(suggestionConfig.activeModeId || suggestionModes[0]?.id || 'new');
+  const [editingSuggestionModeData, setEditingSuggestionModeData] = useState<SuggestionMode>({ id: '', name: '', systemRole: '', instruction: '' });
 
   // Chat states
   const [brainstormMessages, setBrainstormMessages] = useState<Message[]>([]);
@@ -237,6 +251,25 @@ export const Editor: React.FC<EditorProps> = ({
           setSelectedKindId(promptKinds[0].id);
       }
   }, [promptKinds, selectedKindId]);
+
+  // Initialize Suggestion Mode Editor state
+  useEffect(() => {
+    if (isSettingsModalOpen && suggestionSettingsTab === 'mode') {
+        if (editingSuggestionModeId === 'new') {
+            setEditingSuggestionModeData({
+                id: '',
+                name: 'New Mode',
+                systemRole: '',
+                instruction: ''
+            });
+        } else {
+            const mode = suggestionModes.find(m => m.id === editingSuggestionModeId);
+            if (mode) {
+                setEditingSuggestionModeData(mode);
+            }
+        }
+    }
+  }, [editingSuggestionModeId, isSettingsModalOpen, suggestionSettingsTab, suggestionModes]);
 
   // Auto-scroll chat
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -485,6 +518,58 @@ export const Editor: React.FC<EditorProps> = ({
           onManagePromptKinds.delete(id);
           if (selectedKindId === id) {
               setSelectedKindId(promptKinds.find(k => k.id !== id)?.id || '');
+          }
+      }
+  };
+
+  // --- Suggestion Mode Helpers ---
+
+  const handleModeChange = (modeId: string) => {
+      const mode = suggestionModes.find(m => m.id === modeId);
+      if (mode) {
+          // Update the config locally and persist
+          onUpdateSettings(
+              brainstormConfig, 
+              summaryConfig, 
+              { 
+                  ...suggestionConfig, 
+                  activeModeId: mode.id, 
+                  systemRole: mode.systemRole, 
+                  instruction: mode.instruction 
+              }, 
+              providerConfigs
+          );
+      }
+  };
+
+  const saveSuggestionMode = () => {
+      if (!editingSuggestionModeData.name) {
+          alert("Mode name required");
+          return;
+      }
+      
+      if (editingSuggestionModeId === 'new') {
+          const newMode: SuggestionMode = {
+              ...editingSuggestionModeData,
+              id: crypto.randomUUID()
+          };
+          onManageSuggestionModes.add(newMode);
+          setEditingSuggestionModeId(newMode.id);
+      } else {
+          onManageSuggestionModes.update(editingSuggestionModeData);
+      }
+      alert("Mode Saved");
+  };
+
+  const deleteSuggestionMode = (id: string) => {
+      if (suggestionModes.length <= 1) {
+          alert("Must have at least one mode.");
+          return;
+      }
+      if (confirm("Delete this suggestion mode?")) {
+          onManageSuggestionModes.delete(id);
+          if (editingSuggestionModeId === id) {
+             setEditingSuggestionModeId(suggestionModes.find(m => m.id !== id)?.id || '');
           }
       }
   };
@@ -1428,6 +1513,19 @@ ${activePrompt}`;
                             </label>
                         </div>
                         
+                        {/* Mode Selector */}
+                        <div>
+                            <select 
+                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-xs outline-none focus:border-indigo-500 text-slate-300 font-medium"
+                                value={suggestionConfig.activeModeId || suggestionModes[0]?.id || ''}
+                                onChange={(e) => handleModeChange(e.target.value)}
+                            >
+                                {suggestionModes.map(mode => (
+                                    <option key={mode.id} value={mode.id}>{mode.name}</option>
+                                ))}
+                            </select>
+                        </div>
+
                         {/* Character Selector */}
                         <div className="flex flex-col gap-1">
                             <label className="text-[10px] uppercase font-bold text-slate-500">Includes Characters</label>
@@ -1864,66 +1962,112 @@ ${activePrompt}`;
                                 <div className="space-y-3">
                                     {/* Sub Navigation */}
                                     <div className="flex gap-2 mb-4 border-b border-slate-800">
-                                        <button onClick={() => setSuggestionSettingsTab('general')} className={`pb-2 text-xs font-bold uppercase ${suggestionSettingsTab === 'general' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}>General Config</button>
+                                        <button onClick={() => setSuggestionSettingsTab('mode')} className={`pb-2 text-xs font-bold uppercase ${suggestionSettingsTab === 'mode' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}>Suggestion Modes</button>
                                         <button onClick={() => setSuggestionSettingsTab('rephrase')} className={`pb-2 text-xs font-bold uppercase ${suggestionSettingsTab === 'rephrase' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}>Rephrase</button>
                                         <button onClick={() => setSuggestionSettingsTab('expand')} className={`pb-2 text-xs font-bold uppercase ${suggestionSettingsTab === 'expand' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}>Expand</button>
                                     </div>
+                                    
+                                    {/* Provider Settings (Global for Suggestions) */}
+                                    <div className="flex gap-4 p-3 bg-slate-900 rounded border border-slate-800 mb-4">
+                                        <div className="flex-1">
+                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
+                                            <select 
+                                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-xs outline-none focus:border-indigo-500 capitalize"
+                                                value={suggestionConfig.provider}
+                                                onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, provider: e.target.value as LLMProvider}, providerConfigs)}
+                                            >
+                                                <option value="google">Google Gemini</option>
+                                                <option value="openrouter">OpenRouter</option>
+                                                <option value="lmstudio">LM Studio</option>
+                                                <option value="venice">Venice AI</option>
+                                            </select>
+                                        </div>
+                                        <div className="flex-1">
+                                             <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
+                                             <SearchableModelSelect 
+                                                 value={suggestionConfig.model}
+                                                 options={providerConfigs[suggestionConfig.provider]?.availableModels || []}
+                                                 onChange={(val) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, model: val}, providerConfigs)}
+                                                 placeholder="Select Model"
+                                             />
+                                        </div>
+                                        <div className="w-20">
+                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Count</label>
+                                            <input 
+                                                type="number"
+                                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-xs outline-none focus:border-indigo-500"
+                                                value={suggestionConfig.count}
+                                                onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, count: parseInt(e.target.value) || 5}, providerConfigs)}
+                                            />
+                                        </div>
+                                    </div>
 
-                                    {suggestionSettingsTab === 'general' && (
+                                    {suggestionSettingsTab === 'mode' && (
                                         <div className="space-y-3 animate-in fade-in">
-                                            <div className="flex gap-4">
-                                                <div className="flex-1">
-                                                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
-                                                    <select 
-                                                        className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
-                                                        value={suggestionConfig.provider}
-                                                        onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, provider: e.target.value as LLMProvider}, providerConfigs)}
-                                                    >
-                                                        <option value="google">Google Gemini</option>
-                                                        <option value="openrouter">OpenRouter</option>
-                                                        <option value="lmstudio">LM Studio</option>
-                                                        <option value="venice">Venice AI</option>
-                                                    </select>
+                                            <div className="p-3 bg-slate-900 rounded border border-slate-800 space-y-4">
+                                                {/* Mode Selector Header */}
+                                                <div className="flex justify-between items-center pb-3 border-b border-slate-800">
+                                                    <div className="flex-1 mr-4">
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Editing Mode</label>
+                                                        <select 
+                                                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
+                                                            value={editingSuggestionModeId}
+                                                            onChange={(e) => setEditingSuggestionModeId(e.target.value)}
+                                                        >
+                                                            {suggestionModes.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                                            <option value="new">+ Create New Mode</option>
+                                                        </select>
+                                                    </div>
+                                                    <div className="flex items-end gap-2">
+                                                        {editingSuggestionModeId !== 'new' && (
+                                                            <button 
+                                                                onClick={() => deleteSuggestionMode(editingSuggestionModeId)} 
+                                                                className="px-3 py-2 bg-slate-800 text-red-400 hover:bg-red-900/20 hover:text-red-300 rounded text-xs flex items-center gap-1 transition-colors"
+                                                            >
+                                                                <Trash2 size={14}/>
+                                                            </button>
+                                                        )}
+                                                        <button 
+                                                            onClick={saveSuggestionMode} 
+                                                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-bold shadow-lg shadow-indigo-500/20 transition-colors"
+                                                        >
+                                                            {editingSuggestionModeId === 'new' ? 'Create Mode' : 'Save Changes'}
+                                                        </button>
+                                                    </div>
                                                 </div>
-                                                <div className="w-24">
-                                                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Count</label>
-                                                    <input 
-                                                        type="number"
-                                                        className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
-                                                        value={suggestionConfig.count}
-                                                        onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, count: parseInt(e.target.value) || 5}, providerConfigs)}
-                                                    />
+
+                                                {/* Mode Editor Fields */}
+                                                <div className="space-y-3">
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Mode Name</label>
+                                                        <input 
+                                                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
+                                                            value={editingSuggestionModeData.name}
+                                                            onChange={(e) => setEditingSuggestionModeData({...editingSuggestionModeData, name: e.target.value})}
+                                                            placeholder="e.g., Plot Twist Generator"
+                                                        />
+                                                    </div>
+
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Role (Persona & Format)</label>
+                                                        <textarea 
+                                                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar font-mono text-xs"
+                                                            value={editingSuggestionModeData.systemRole}
+                                                            onChange={(e) => setEditingSuggestionModeData({...editingSuggestionModeData, systemRole: e.target.value})}
+                                                            placeholder="You are a story plotter. Return JSON array..."
+                                                        />
+                                                    </div>
+
+                                                    <div>
+                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Instruction Template (Context & Task)</label>
+                                                        <textarea 
+                                                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
+                                                            value={editingSuggestionModeData.instruction}
+                                                            onChange={(e) => setEditingSuggestionModeData({...editingSuggestionModeData, instruction: e.target.value})}
+                                                            placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}, {globalCodex}"
+                                                        />
+                                                    </div>
                                                 </div>
-                                            </div>
-
-                                            <div>
-                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
-                                                <SearchableModelSelect 
-                                                    value={suggestionConfig.model}
-                                                    options={providerConfigs[suggestionConfig.provider]?.availableModels || []}
-                                                    onChange={(val) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, model: val}, providerConfigs)}
-                                                    placeholder="Select Model"
-                                                />
-                                            </div>
-
-                                            <div>
-                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Role (Persona & Format)</label>
-                                                <textarea 
-                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar font-mono text-xs"
-                                                    value={suggestionConfig.systemRole}
-                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, systemRole: e.target.value}, providerConfigs)}
-                                                    placeholder="You are a story plotter. Return JSON array..."
-                                                />
-                                            </div>
-
-                                            <div>
-                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Instruction Template (Context & Task)</label>
-                                                <textarea 
-                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                                    value={suggestionConfig.instruction}
-                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, instruction: e.target.value}, providerConfigs)}
-                                                    placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}, {globalCodex}"
-                                                />
                                             </div>
                                         </div>
                                     )}
