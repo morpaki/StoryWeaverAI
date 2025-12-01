@@ -173,7 +173,8 @@ const App: React.FC = () => {
     suggestionConfig: DEFAULT_SUGGESTION_CONFIG,
     suggestionModes: [],
     providerConfigs: DEFAULT_PROVIDER_CONFIGS,
-    promptKinds: []
+    promptKinds: [],
+    promptHistory: []
   });
   const [isLoaded, setIsLoaded] = useState(false);
 
@@ -194,6 +195,7 @@ const App: React.FC = () => {
         let brainstormConfig = (dbSettings?.brainstorm || DEFAULT_BRAINSTORM_CONFIG) as any;
         let summaryConfig = (dbSettings?.summary || DEFAULT_SUMMARY_CONFIG) as any;
         let suggestionConfig = (dbSettings?.suggestion || DEFAULT_SUGGESTION_CONFIG) as any;
+        let promptHistory = dbSettings?.promptHistory || [];
         
         // Merge loaded providers with defaults
         let loadedProviders = dbSettings?.providers || DEFAULT_PROVIDER_CONFIGS;
@@ -318,7 +320,8 @@ const App: React.FC = () => {
             suggestionConfig: suggestionConfig,
             suggestionModes: suggestionModes,
             providerConfigs: providerConfigs,
-            promptKinds: migratedPromptKinds
+            promptKinds: migratedPromptKinds,
+            promptHistory: promptHistory
         }));
       } catch (err) {
         console.error("DB Initialization error", err);
@@ -383,6 +386,14 @@ const App: React.FC = () => {
   const updateSettings = (brainstormConfig: BrainstormConfig, summaryConfig: SummaryConfig, suggestionConfig: SuggestionConfig, providerConfigs: ProviderConfigs) => {
     db.saveSettings(brainstormConfig, summaryConfig, suggestionConfig, providerConfigs).catch(console.error);
     setState(prev => ({ ...prev, brainstormConfig, summaryConfig, suggestionConfig, providerConfigs }));
+  };
+
+  const addToPromptHistory = (prompt: string) => {
+      setState(prev => {
+          const newHistory = [prompt, ...prev.promptHistory.filter(p => p !== prompt)].slice(0, 50);
+          db.savePromptHistory(newHistory).catch(console.error);
+          return { ...prev, promptHistory: newHistory };
+      });
   };
 
   const managePromptKinds = {
@@ -456,6 +467,8 @@ const App: React.FC = () => {
           onManagePromptKinds={managePromptKinds}
           suggestionModes={state.suggestionModes}
           onManageSuggestionModes={manageSuggestionModes}
+          promptHistory={state.promptHistory}
+          onAddToHistory={addToPromptHistory}
         />
       );
     }

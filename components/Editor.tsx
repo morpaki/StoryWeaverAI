@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import { Book, Chapter, CodexItem, Character, LLMConfig, Message, PromptKind, ProviderConfigs, LLMProvider, BrainstormConfig, BrainstormContextType, SummaryConfig, SuggestionConfig, SuggestionMode } from '../types';
 import { 
   ArrowLeft, Plus, Save, Send, Sparkles, Settings, BookOpen, 
-  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, PanelRight, Search, Lightbulb, Check, ChevronUp, Undo2, Maximize2, Palette
+  MessageSquare, Trash2, RefreshCw, Wand2, FileText, Edit2, X, Globe, RotateCcw, MoreHorizontal, Paperclip, CheckSquare, Square, Users, Image as ImageIcon, User, Sliders, AlertCircle, ChevronDown, PanelLeft, PanelRight, Search, Lightbulb, Check, ChevronUp, Undo2, Maximize2, Palette, Clock, Eye
 } from 'lucide-react';
 import { LLMService } from '../services/llmService';
 
@@ -31,6 +31,9 @@ interface EditorProps {
       update: (mode: SuggestionMode) => void;
       delete: (id: string) => void;
   };
+  
+  promptHistory: string[];
+  onAddToHistory: (prompt: string) => void;
 }
 
 const POV_OPTIONS = [
@@ -149,7 +152,9 @@ export const Editor: React.FC<EditorProps> = ({
   promptKinds,
   onManagePromptKinds,
   suggestionModes,
-  onManageSuggestionModes
+  onManageSuggestionModes,
+  promptHistory,
+  onAddToHistory
 }) => {
   const [activeChapterId, setActiveChapterId] = useState<string | null>(
     book.chapters.length > 0 ? book.chapters[0].id : null
@@ -185,11 +190,18 @@ export const Editor: React.FC<EditorProps> = ({
   const [isGeneratingSuggestions, setIsGeneratingSuggestions] = useState(false);
   const [autoGenerateSuggestions, setAutoGenerateSuggestions] = useState(false);
   const [processingSuggestionId, setProcessingSuggestionId] = useState<string | null>(null);
+  
+  // Suggestion Editing State
+  const [editingSuggestionId, setEditingSuggestionId] = useState<string | null>(null);
+  const [editingSuggestionText, setEditingSuggestionText] = useState('');
 
   // Prompt State
   const [promptInput, setPromptInput] = useState('');
   const [selectedKindId, setSelectedKindId] = useState<string>(promptKinds[0]?.id || '');
   const [isStoryGenerating, setIsStoryGenerating] = useState(false);
+  const [lastDebugPrompt, setLastDebugPrompt] = useState<string | null>(null);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isFullPromptModalOpen, setIsFullPromptModalOpen] = useState(false);
 
   // Retry/Revert State
   const [lastAction, setLastAction] = useState<LastAction | null>(null);
@@ -232,6 +244,7 @@ export const Editor: React.FC<EditorProps> = ({
   const storyAbortController = useRef<AbortController | null>(null);
   const brainstormAbortController = useRef<AbortController | null>(null);
   const suggestionAbortController = useRef<AbortController | null>(null);
+  const historyDropdownRef = useRef<HTMLDivElement>(null);
 
   const activeChapter = book.chapters.find(c => c.id === activeChapterId);
 
@@ -270,6 +283,19 @@ export const Editor: React.FC<EditorProps> = ({
         }
     }
   }, [editingSuggestionModeId, isSettingsModalOpen, suggestionSettingsTab, suggestionModes]);
+
+  // Click outside to close history
+  useEffect(() => {
+      const handleClickOutside = (event: MouseEvent) => {
+          if (historyDropdownRef.current && !historyDropdownRef.current.contains(event.target as Node)) {
+              setIsHistoryOpen(false);
+          }
+      };
+      if (isHistoryOpen) {
+          document.addEventListener('mousedown', handleClickOutside);
+      }
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isHistoryOpen]);
 
   // Auto-scroll chat
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -792,6 +818,28 @@ ${instruction}
           setIsGeneratingSuggestions(false);
       }
   };
+  
+  const startEditingSuggestion = (s: GeneratedSuggestion) => {
+      setEditingSuggestionId(s.id);
+      setEditingSuggestionText(s.suggestionDescription);
+  };
+
+  const saveSuggestionEdit = () => {
+      setGeneratedSuggestions(prev => prev.map(s => {
+          if (s.id === editingSuggestionId) {
+               const detected = detectCharacters(editingSuggestionText);
+               return { ...s, suggestionDescription: editingSuggestionText, characters: detected };
+          }
+          return s;
+      }));
+      setEditingSuggestionId(null);
+      setEditingSuggestionText('');
+  };
+
+  const cancelSuggestionEdit = () => {
+      setEditingSuggestionId(null);
+      setEditingSuggestionText('');
+  };
 
   // --- LLM Operations ---
 
@@ -815,6 +863,9 @@ ${instruction}
     const currentChapterContent = overrideContent !== undefined ? overrideContent : (activeChapter?.content || '');
     
     if (!activePrompt.trim() || !activeChapter) return;
+    
+    // Save to history
+    onAddToHistory(activePrompt);
     
     // Find selected Prompt Kind
     const selectedKind = promptKinds.find(k => k.id === selectedKindId);
@@ -935,6 +986,8 @@ ${userInstruction}
 
 Input/Action:
 ${activePrompt}`;
+
+    setLastDebugPrompt(fullPrompt);
 
     // 5. Construct Configuration
     const config = getRuntimeConfig(selectedKind.provider, selectedKind.model, {
@@ -1492,29 +1545,57 @@ ${activePrompt}`;
                                 </div>
                                 {s.isExpanded && (
                                     <div className="px-3 pb-3 pt-1 border-t border-slate-800/50 bg-slate-950/30">
-                                        <p className="text-xs text-slate-400 mb-3 leading-relaxed whitespace-pre-wrap">{s.suggestionDescription}</p>
-                                        <div className="flex gap-2">
-                                            <button 
-                                                onClick={() => handleApplySuggestion(s)}
-                                                className="flex-1 flex items-center justify-center gap-2 bg-indigo-600/90 hover:bg-indigo-500 text-white text-xs py-1.5 rounded transition-colors"
-                                            >
-                                                <Check size={12} /> Apply
-                                            </button>
-                                            <button 
-                                                onClick={(e) => handleRephraseSuggestion(s, e)}
-                                                className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-orange-400 text-xs px-3 py-1.5 rounded transition-colors"
-                                                title="Rephrase"
-                                            >
-                                                <RefreshCw size={12} /> Rephrase
-                                            </button>
-                                            <button 
-                                                onClick={(e) => handleExpandSuggestion(s, e)}
-                                                className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-green-400 text-xs px-3 py-1.5 rounded transition-colors"
-                                                title="Expand"
-                                            >
-                                                <Maximize2 size={12} /> Expand
-                                            </button>
-                                        </div>
+                                        {editingSuggestionId === s.id ? (
+                                            <div className="mb-3 animate-in fade-in zoom-in-95 duration-200">
+                                                <textarea 
+                                                    className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs text-slate-300 resize-none outline-none focus:border-indigo-500 min-h-[100px] custom-scrollbar"
+                                                    value={editingSuggestionText}
+                                                    onChange={(e) => setEditingSuggestionText(e.target.value)}
+                                                    autoFocus
+                                                    placeholder="Edit suggestion..."
+                                                />
+                                                <div className="flex gap-2 mt-2 justify-end">
+                                                     <button onClick={cancelSuggestionEdit} className="text-xs px-3 py-1 bg-slate-800 text-slate-400 border border-slate-700 hover:text-white rounded transition-colors">Cancel</button>
+                                                     <button onClick={saveSuggestionEdit} className="text-xs px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-500 transition-colors">Save</button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="relative group/desc mb-3">
+                                                 <p className="text-xs text-slate-400 leading-relaxed whitespace-pre-wrap pr-4 cursor-text hover:text-slate-300 transition-colors" onClick={() => startEditingSuggestion(s)} title="Click to edit">{s.suggestionDescription}</p>
+                                                 <button 
+                                                    onClick={(e) => { e.stopPropagation(); startEditingSuggestion(s); }} 
+                                                    className="absolute top-0 right-0 p-1 text-slate-600 hover:text-indigo-400 opacity-0 group-hover/desc:opacity-100 transition-opacity"
+                                                    title="Edit Description"
+                                                >
+                                                    <Edit2 size={12}/>
+                                                </button>
+                                            </div>
+                                        )}
+                                        
+                                        {editingSuggestionId !== s.id && (
+                                            <div className="flex gap-2">
+                                                <button 
+                                                    onClick={() => handleApplySuggestion(s)}
+                                                    className="flex-1 flex items-center justify-center gap-2 bg-indigo-600/90 hover:bg-indigo-500 text-white text-xs py-1.5 rounded transition-colors"
+                                                >
+                                                    <Check size={12} /> Apply
+                                                </button>
+                                                <button 
+                                                    onClick={(e) => handleRephraseSuggestion(s, e)}
+                                                    className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-orange-400 text-xs px-3 py-1.5 rounded transition-colors"
+                                                    title="Rephrase"
+                                                >
+                                                    <RefreshCw size={12} /> Rephrase
+                                                </button>
+                                                <button 
+                                                    onClick={(e) => handleExpandSuggestion(s, e)}
+                                                    className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-green-400 text-xs px-3 py-1.5 rounded transition-colors"
+                                                    title="Expand"
+                                                >
+                                                    <Maximize2 size={12} /> Expand
+                                                </button>
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -1671,6 +1752,41 @@ ${activePrompt}`;
                         </div>
                         <button onClick={() => openEditPromptKindModal(selectedKindId)} className="p-1 text-slate-500 hover:text-indigo-400" title="Edit Prompt Settings"><Edit2 size={14} /></button>
                          <button onClick={openNewPromptKindModal} className="p-1 text-slate-500 hover:text-indigo-400" title="New Prompt Kind"><Plus size={14} /></button>
+                        
+                        {/* History Button */}
+                         <div className="relative" ref={historyDropdownRef}>
+                             <button onClick={() => setIsHistoryOpen(!isHistoryOpen)} className="p-1 text-slate-500 hover:text-indigo-400" title="Prompt History">
+                                 <Clock size={14} />
+                             </button>
+                             {isHistoryOpen && (
+                                 <div className="absolute top-full left-0 mt-2 w-80 bg-slate-900 border border-slate-700 rounded-lg shadow-xl z-50 flex flex-col max-h-64">
+                                     <div className="p-2 border-b border-slate-800 text-[10px] font-bold text-slate-500 uppercase">Recent Prompts</div>
+                                     <div className="overflow-y-auto flex-1 custom-scrollbar">
+                                         {promptHistory.length === 0 ? (
+                                             <div className="p-4 text-xs text-slate-600 text-center italic">No history yet.</div>
+                                         ) : (
+                                             promptHistory.map((h, i) => (
+                                                 <button 
+                                                    key={i} 
+                                                    onClick={() => { setPromptInput(h); setIsHistoryOpen(false); }}
+                                                    className="w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-slate-800 border-b border-slate-800/50 last:border-0 truncate"
+                                                 >
+                                                     {h}
+                                                 </button>
+                                             ))
+                                         )}
+                                     </div>
+                                 </div>
+                             )}
+                         </div>
+
+                        {/* View Full Prompt Button */}
+                        {lastDebugPrompt && (
+                             <button onClick={() => setIsFullPromptModalOpen(true)} className="p-1 text-slate-500 hover:text-indigo-400" title="View Full Sent Prompt">
+                                 <Eye size={14} />
+                             </button>
+                        )}
+
                         <div className="flex-1" />
                         {isStoryGenerating && <span className="text-xs text-indigo-400 animate-pulse">Writing...</span>}
                      </div>
@@ -1797,6 +1913,28 @@ ${activePrompt}`;
                 </div>
             </details>
         </div>
+      )}
+
+      {/* Full Prompt Viewer Modal */}
+      {isFullPromptModalOpen && lastDebugPrompt && (
+           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setIsFullPromptModalOpen(false)}>
+               <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[800px] max-w-[90vw] flex flex-col overflow-hidden max-h-[80vh]" onClick={(e) => e.stopPropagation()}>
+                   <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-850">
+                       <h3 className="font-bold text-slate-200 flex items-center gap-2"><Eye size={18} className="text-indigo-400"/> Full Sent Prompt</h3>
+                       <button onClick={() => setIsFullPromptModalOpen(false)} className="text-slate-500 hover:text-white"><X size={20} /></button>
+                   </div>
+                   <div className="flex-1 p-0 overflow-hidden">
+                       <textarea 
+                          readOnly 
+                          className="w-full h-full bg-slate-950 p-4 text-xs font-mono text-slate-300 outline-none resize-none"
+                          value={lastDebugPrompt} 
+                        />
+                   </div>
+                   <div className="p-3 border-t border-slate-800 bg-slate-850 flex justify-end">
+                       <button onClick={() => setIsFullPromptModalOpen(false)} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Close</button>
+                   </div>
+               </div>
+           </div>
       )}
 
       {/* Settings Modal */}
@@ -2389,7 +2527,7 @@ ${activePrompt}`;
                             </div>
                        </div>
                        
-                       <div className="flex flex-col h-[300px]">
+                       <div className="flex-col h-[300px] flex">
                            <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Description</label>
                            <textarea className="flex-1 w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar" placeholder="Detailed physical description, personality, background..." value={charDesc} onChange={(e) => setCharDesc(e.target.value)}/>
                        </div>

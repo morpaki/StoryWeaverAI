@@ -67,7 +67,7 @@ export const db = {
     });
   },
 
-  async getSettings(): Promise<{ brainstorm?: BrainstormConfig, summary?: SummaryConfig, suggestion?: SuggestionConfig, providers?: ProviderConfigs } | undefined> {
+  async getSettings(): Promise<{ brainstorm?: BrainstormConfig, summary?: SummaryConfig, suggestion?: SuggestionConfig, providers?: ProviderConfigs, promptHistory?: string[] } | undefined> {
     const db = await this.open();
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(STORE_SETTINGS, 'readonly');
@@ -77,6 +77,7 @@ export const db = {
       const requestSummary = store.get('summaryConfig');
       const requestSuggestion = store.get('suggestionConfig');
       const requestProviders = store.get('providerConfigs');
+      const requestHistory = store.get('promptHistory');
       
       let result: any = {};
       
@@ -89,7 +90,10 @@ export const db = {
                 result.suggestion = requestSuggestion.result;
                 requestProviders.onsuccess = () => {
                     result.providers = requestProviders.result;
-                    resolve(result);
+                    requestHistory.onsuccess = () => {
+                        result.promptHistory = requestHistory.result;
+                        resolve(result);
+                    }
                 }
             }
           }
@@ -111,6 +115,17 @@ export const db = {
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
     });
+  },
+
+  async savePromptHistory(history: string[]): Promise<void> {
+      const db = await this.open();
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE_SETTINGS, 'readwrite');
+          const store = transaction.objectStore(STORE_SETTINGS);
+          const request = store.put(history, 'promptHistory');
+          request.onsuccess = () => resolve();
+          request.onerror = () => reject(request.error);
+      });
   },
 
   async getAllPromptKinds(): Promise<PromptKind[]> {

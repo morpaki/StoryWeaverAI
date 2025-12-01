@@ -134,4 +134,7 @@ export interface AppState {
   providerConfigs: ProviderConfigs;
 
   promptKinds: PromptKind[];
+  
+  // History of user prompts
+  promptHistory: string[];
 }
