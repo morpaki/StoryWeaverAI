@@ -209,6 +209,9 @@ export const Editor: React.FC<EditorProps> = ({
   // Error State
   const [errorState, setErrorState] = useState<{ short: string; full: string } | null>(null);
 
+  // Typing Effect State
+  const [isTyping, setIsTyping] = useState(false);
+
   // Codex management
   const [newCodexTitle, setNewCodexTitle] = useState('');
   const [newCodexTags, setNewCodexTags] = useState('');
@@ -245,6 +248,7 @@ export const Editor: React.FC<EditorProps> = ({
   const brainstormAbortController = useRef<AbortController | null>(null);
   const suggestionAbortController = useRef<AbortController | null>(null);
   const historyDropdownRef = useRef<HTMLDivElement>(null);
+  const typingInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const activeChapter = book.chapters.find(c => c.id === activeChapterId);
 
@@ -296,6 +300,13 @@ export const Editor: React.FC<EditorProps> = ({
       }
       return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isHistoryOpen]);
+
+  // Cleanup typing interval on unmount
+  useEffect(() => {
+      return () => {
+          if (typingInterval.current) clearInterval(typingInterval.current);
+      }
+  }, []);
 
   // Auto-scroll chat
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -1065,6 +1076,8 @@ ${activePrompt}`;
           }
           setLastAction(null);
       } else if (lastAction.type === 'suggestion_mod') {
+          // This path is technically less reachable now for Rephrase/Expand as they trigger pastes
+          // but kept for safety.
           setGeneratedSuggestions(prev => prev.map(s => {
               if (s.id === lastAction.suggestionId) {
                   // Revert description and re-run simple detection to ensure consistent state
@@ -1225,24 +1238,73 @@ ${activePrompt}`;
     }
   };
 
+  // --- Suggestion Pasting & Typewriter Logic ---
+
+  const typewriterAppend = (text: string) => {
+    if (!activeChapter) return;
+    
+    const speed = suggestionConfig.typingSpeed ?? 50;
+    const content = activeChapter.content;
+    const initialSeparator = content ? "\n\n" : "";
+    const addedLength = text.length + initialSeparator.length;
+
+    // Clear any existing typing interval
+    if (typingInterval.current) {
+        clearInterval(typingInterval.current);
+        setIsTyping(false);
+    }
+
+    // Instant paste if speed is 0 or very fast
+    if (speed <= 0) {
+        updateChapter(activeChapter.id, { content: content + initialSeparator + text });
+        setLastAction({
+            type: 'story_paste',
+            responseLength: addedLength
+        });
+        // Clear suggestions after apply
+        setGeneratedSuggestions([]);
+        setSuggestionKeywords('');
+        setSuggestionSelectedCharIds([]);
+        return;
+    }
+
+    // Typewriter Effect
+    setIsTyping(true);
+    const words = text.split(/(\s+)/); // Split keeping separators
+    let currentIndex = 0;
+    let currentContent = content + initialSeparator;
+    
+    // Set last action immediately so undo works if they stop midway? 
+    // Or set it at end? Better at end to have correct length.
+    
+    typingInterval.current = setInterval(() => {
+        if (currentIndex >= words.length) {
+            if (typingInterval.current) clearInterval(typingInterval.current);
+            setIsTyping(false);
+            
+            // Final consistency save and set undo state
+            updateChapter(activeChapter.id, { content: currentContent });
+            setLastAction({
+                type: 'story_paste',
+                responseLength: addedLength
+            });
+            // Clear suggestions after apply
+            setGeneratedSuggestions([]);
+            setSuggestionKeywords('');
+            setSuggestionSelectedCharIds([]);
+            return;
+        }
+
+        currentContent += words[currentIndex];
+        // We update the chapter on every 'word' which might trigger DB writes. 
+        // For local IndexedDB this is usually acceptable at typing speeds (e.g. 50ms).
+        updateChapter(activeChapter.id, { content: currentContent });
+        currentIndex++;
+    }, speed);
+  };
+
   const handleApplySuggestion = (suggestion: GeneratedSuggestion) => {
-      if (!activeChapter) return;
-      const content = activeChapter.content;
-      // Just paste text instead of generating
-      const textToPaste = suggestion.suggestionDescription;
-      const newContent = content + (content ? "\n\n" : "") + textToPaste;
-      const addedLength = textToPaste.length + (content ? 2 : 0);
-
-      updateChapter(activeChapter.id, { content: newContent });
-      
-      setLastAction({
-          type: 'story_paste',
-          responseLength: addedLength
-      });
-
-      setGeneratedSuggestions([]);
-      setSuggestionKeywords('');
-      setSuggestionSelectedCharIds([]);
+      typewriterAppend(suggestion.suggestionDescription);
   };
 
   // Helper to compile context for Expand/Rephrase
@@ -1262,7 +1324,7 @@ ${activePrompt}`;
   const handleRephraseSuggestion = async (suggestion: GeneratedSuggestion, e: React.MouseEvent) => {
       e.stopPropagation();
       setProcessingSuggestionId(suggestion.id);
-      const previousDesc = suggestion.suggestionDescription;
+      // const previousDesc = suggestion.suggestionDescription; // No longer storing for revert of card, as we paste directly
       
       try {
           // Detect characters in the *current* suggestion description to be up-to-date
@@ -1282,10 +1344,13 @@ ${activePrompt}`;
 
           const result = await LLMService.generateCompletion(instruction, systemRole, config);
           
+          // Update the card UI so the user sees the new version
           setGeneratedSuggestions(prev => prev.map(s => 
              s.id === suggestion.id ? { ...s, suggestionDescription: result, characters: currentChars } : s
           ));
-          setLastAction({ type: 'suggestion_mod', suggestionId: suggestion.id, previousDescription: previousDesc });
+
+          // Automatically add to editor with typewriter effect
+          typewriterAppend(result);
 
       } catch (err) {
           handleError(err);
@@ -1297,10 +1362,9 @@ ${activePrompt}`;
   const handleExpandSuggestion = async (suggestion: GeneratedSuggestion, e: React.MouseEvent) => {
       e.stopPropagation();
       setProcessingSuggestionId(suggestion.id);
-      const previousDesc = suggestion.suggestionDescription;
+      // const previousDesc = suggestion.suggestionDescription; 
 
       try {
-          // Detect characters in the *current* suggestion description to be up-to-date
           const currentChars = detectCharacters(suggestion.suggestionDescription);
           const { charText, globalCodexText } = getSuggestionContext(currentChars);
           
@@ -1317,10 +1381,13 @@ ${activePrompt}`;
 
           const result = await LLMService.generateCompletion(instruction, systemRole, config);
           
+          // Update the card UI
           setGeneratedSuggestions(prev => prev.map(s => 
              s.id === suggestion.id ? { ...s, suggestionDescription: result, characters: currentChars } : s
           ));
-          setLastAction({ type: 'suggestion_mod', suggestionId: suggestion.id, previousDescription: previousDesc });
+
+          // Automatically add to editor with typewriter effect
+          typewriterAppend(result);
 
       } catch (err) {
           handleError(err);
@@ -1576,21 +1643,24 @@ ${activePrompt}`;
                                             <div className="flex gap-2">
                                                 <button 
                                                     onClick={() => handleApplySuggestion(s)}
-                                                    className="flex-1 flex items-center justify-center gap-2 bg-indigo-600/90 hover:bg-indigo-500 text-white text-xs py-1.5 rounded transition-colors"
+                                                    disabled={isTyping}
+                                                    className="flex-1 flex items-center justify-center gap-2 bg-indigo-600/90 hover:bg-indigo-500 text-white text-xs py-1.5 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                                 >
                                                     <Check size={12} /> Apply
                                                 </button>
                                                 <button 
                                                     onClick={(e) => handleRephraseSuggestion(s, e)}
-                                                    className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-orange-400 text-xs px-3 py-1.5 rounded transition-colors"
-                                                    title="Rephrase"
+                                                    disabled={isTyping}
+                                                    className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-orange-400 text-xs px-3 py-1.5 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    title="Rephrase & Apply"
                                                 >
                                                     <RefreshCw size={12} /> Rephrase
                                                 </button>
                                                 <button 
                                                     onClick={(e) => handleExpandSuggestion(s, e)}
-                                                    className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-green-400 text-xs px-3 py-1.5 rounded transition-colors"
-                                                    title="Expand"
+                                                    disabled={isTyping}
+                                                    className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-green-400 text-xs px-3 py-1.5 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                    title="Expand & Apply"
                                                 >
                                                     <Maximize2 size={12} /> Expand
                                                 </button>
@@ -1733,6 +1803,7 @@ ${activePrompt}`;
                                 // Clear highlight/last action on user manual input
                                 setLastAction(null);
                             }}
+                            readOnly={isTyping}
                             spellCheck={false}
                         />
                     </div>
@@ -1789,6 +1860,7 @@ ${activePrompt}`;
 
                         <div className="flex-1" />
                         {isStoryGenerating && <span className="text-xs text-indigo-400 animate-pulse">Writing...</span>}
+                        {isTyping && <span className="text-xs text-indigo-400 animate-pulse">Typing...</span>}
                      </div>
                      <div className="flex gap-2 flex-1 min-h-0">
                         <textarea className="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-3 resize-none text-sm outline-none focus:border-indigo-500/50 transition-colors" placeholder="Prompt instruction..." value={promptInput} onChange={(e) => setPromptInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); generateStory(); }}}/>
@@ -1796,9 +1868,9 @@ ${activePrompt}`;
                             {isStoryGenerating ? (
                                  <button onClick={cancelStoryGeneration} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-red-600 hover:bg-red-500 text-white" title="Stop"><Square size={20} fill="currentColor" /></button>
                             ) : (
-                                 <button onClick={() => generateStory()} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-indigo-600 hover:bg-indigo-500 text-white"><Send size={20} /></button>
+                                 <button onClick={() => generateStory()} disabled={isTyping} className="h-10 w-12 rounded-lg flex items-center justify-center transition-colors bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"><Send size={20} /></button>
                             )}
-                            {lastAction && !isStoryGenerating && (
+                            {lastAction && !isStoryGenerating && !isTyping && (
                                 <div className="flex gap-1">
                                     <button onClick={handleRevert} className="p-1.5 rounded hover:bg-slate-800 text-slate-500 hover:text-indigo-400 transition-colors" title="Undo Last Action"><Undo2 size={14} /></button>
                                     {lastAction.type === 'story_gen' && (
@@ -2106,439 +2178,4 @@ ${activePrompt}`;
                                         <textarea 
                                             className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
                                             value={brainstormConfig.instruction}
-                                            onChange={(e) => onUpdateSettings({...brainstormConfig, instruction: e.target.value}, summaryConfig, suggestionConfig, providerConfigs)}
-                                            placeholder="Variables: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}"
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Suggestions Configuration Section */}
-                        {settingsTab === 'suggestions' && (
-                            <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                                <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4 border-b border-slate-800 pb-2 flex items-center gap-2"><Lightbulb size={14}/> Suggestions Config</h4>
-                                
-                                <div className="space-y-3">
-                                    {/* Sub Navigation */}
-                                    <div className="flex gap-2 mb-4 border-b border-slate-800">
-                                        <button onClick={() => setSuggestionSettingsTab('mode')} className={`pb-2 text-xs font-bold uppercase ${suggestionSettingsTab === 'mode' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}>Suggestion Modes</button>
-                                        <button onClick={() => setSuggestionSettingsTab('rephrase')} className={`pb-2 text-xs font-bold uppercase ${suggestionSettingsTab === 'rephrase' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}>Rephrase</button>
-                                        <button onClick={() => setSuggestionSettingsTab('expand')} className={`pb-2 text-xs font-bold uppercase ${suggestionSettingsTab === 'expand' ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-500 hover:text-slate-300'}`}>Expand</button>
-                                    </div>
-                                    
-                                    {/* Provider Settings (Global for Suggestions) */}
-                                    <div className="flex gap-4 p-3 bg-slate-900 rounded border border-slate-800 mb-4">
-                                        <div className="flex-1">
-                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
-                                            <select 
-                                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-xs outline-none focus:border-indigo-500 capitalize"
-                                                value={suggestionConfig.provider}
-                                                onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, provider: e.target.value as LLMProvider}, providerConfigs)}
-                                            >
-                                                <option value="google">Google Gemini</option>
-                                                <option value="openrouter">OpenRouter</option>
-                                                <option value="lmstudio">LM Studio</option>
-                                                <option value="venice">Venice AI</option>
-                                            </select>
-                                        </div>
-                                        <div className="flex-1">
-                                             <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
-                                             <SearchableModelSelect 
-                                                 value={suggestionConfig.model}
-                                                 options={providerConfigs[suggestionConfig.provider]?.availableModels || []}
-                                                 onChange={(val) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, model: val}, providerConfigs)}
-                                                 placeholder="Select Model"
-                                             />
-                                        </div>
-                                        <div className="w-20">
-                                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Count</label>
-                                            <input 
-                                                type="number"
-                                                className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1.5 text-xs outline-none focus:border-indigo-500"
-                                                value={suggestionConfig.count}
-                                                onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, count: parseInt(e.target.value) || 5}, providerConfigs)}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    {suggestionSettingsTab === 'mode' && (
-                                        <div className="space-y-3 animate-in fade-in">
-                                            <div className="p-3 bg-slate-900 rounded border border-slate-800 space-y-4">
-                                                {/* Mode Selector Header */}
-                                                <div className="flex justify-between items-center pb-3 border-b border-slate-800">
-                                                    <div className="flex-1 mr-4">
-                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Editing Mode</label>
-                                                        <select 
-                                                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
-                                                            value={editingSuggestionModeId}
-                                                            onChange={(e) => setEditingSuggestionModeId(e.target.value)}
-                                                        >
-                                                            {suggestionModes.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-                                                            <option value="new">+ Create New Mode</option>
-                                                        </select>
-                                                    </div>
-                                                    <div className="flex items-end gap-2">
-                                                        {editingSuggestionModeId !== 'new' && (
-                                                            <button 
-                                                                onClick={() => deleteSuggestionMode(editingSuggestionModeId)} 
-                                                                className="px-3 py-2 bg-slate-800 text-red-400 hover:bg-red-900/20 hover:text-red-300 rounded text-xs flex items-center gap-1 transition-colors"
-                                                            >
-                                                                <Trash2 size={14}/>
-                                                            </button>
-                                                        )}
-                                                        <button 
-                                                            onClick={saveSuggestionMode} 
-                                                            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-bold shadow-lg shadow-indigo-500/20 transition-colors"
-                                                        >
-                                                            {editingSuggestionModeId === 'new' ? 'Create Mode' : 'Save Changes'}
-                                                        </button>
-                                                    </div>
-                                                </div>
-
-                                                {/* Mode Editor Fields */}
-                                                <div className="space-y-3">
-                                                    <div>
-                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Mode Name</label>
-                                                        <input 
-                                                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
-                                                            value={editingSuggestionModeData.name}
-                                                            onChange={(e) => setEditingSuggestionModeData({...editingSuggestionModeData, name: e.target.value})}
-                                                            placeholder="e.g., Plot Twist Generator"
-                                                        />
-                                                    </div>
-
-                                                    <div>
-                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Role (Persona & Format)</label>
-                                                        <textarea 
-                                                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar font-mono text-xs"
-                                                            value={editingSuggestionModeData.systemRole}
-                                                            onChange={(e) => setEditingSuggestionModeData({...editingSuggestionModeData, systemRole: e.target.value})}
-                                                            placeholder="You are a story plotter. Return JSON array..."
-                                                        />
-                                                    </div>
-
-                                                    <div>
-                                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Instruction Template (Context & Task)</label>
-                                                        <textarea 
-                                                            className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                                            value={editingSuggestionModeData.instruction}
-                                                            onChange={(e) => setEditingSuggestionModeData({...editingSuggestionModeData, instruction: e.target.value})}
-                                                            placeholder="Variables: {count}, {pov}, {tense}, {characters}, {keywords}, {globalCodex}, {storySoFar}"
-                                                        />
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {suggestionSettingsTab === 'rephrase' && (
-                                        <div className="space-y-3 animate-in fade-in">
-                                            <div>
-                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Rephrase System Role</label>
-                                                <textarea 
-                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                                    value={suggestionConfig.rephrase?.systemRole || ''}
-                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, rephrase: { ...suggestionConfig.rephrase, systemRole: e.target.value }}, providerConfigs)}
-                                                />
-                                            </div>
-                                            <div>
-                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Rephrase Instruction Template</label>
-                                                <textarea 
-                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                                    value={suggestionConfig.rephrase?.instruction || ''}
-                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, rephrase: { ...suggestionConfig.rephrase, instruction: e.target.value }}, providerConfigs)}
-                                                    placeholder="Variables: {text}, {characters}, {globalCodex}, {storySoFar}"
-                                                />
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {suggestionSettingsTab === 'expand' && (
-                                        <div className="space-y-3 animate-in fade-in">
-                                            <div>
-                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Expand System Role</label>
-                                                <textarea 
-                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                                    value={suggestionConfig.expand?.systemRole || ''}
-                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, expand: { ...suggestionConfig.expand, systemRole: e.target.value }}, providerConfigs)}
-                                                />
-                                            </div>
-                                            <div>
-                                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Expand Instruction Template</label>
-                                                <textarea 
-                                                    className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                                    value={suggestionConfig.expand?.instruction || ''}
-                                                    onChange={(e) => onUpdateSettings(brainstormConfig, summaryConfig, {...suggestionConfig, expand: { ...suggestionConfig.expand, instruction: e.target.value }}, providerConfigs)}
-                                                    placeholder="Variables: {text}, {characters}, {globalCodex}, {storySoFar}"
-                                                />
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Auto Summary Configuration Section */}
-                        {settingsTab === 'summary' && (
-                            <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                                <h4 className="text-xs font-bold text-indigo-400 uppercase mb-4 border-b border-slate-800 pb-2 flex items-center gap-2"><FileText size={14}/> Auto Summary Config</h4>
-                                
-                                <div className="space-y-3">
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Provider</label>
-                                        <select 
-                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
-                                            value={summaryConfig.provider}
-                                            onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, provider: e.target.value as LLMProvider}, suggestionConfig, providerConfigs)}
-                                        >
-                                            <option value="google">Google Gemini</option>
-                                            <option value="openrouter">OpenRouter</option>
-                                            <option value="lmstudio">LM Studio</option>
-                                            <option value="venice">Venice AI</option>
-                                        </select>
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model</label>
-                                        <SearchableModelSelect 
-                                            value={summaryConfig.model}
-                                            options={providerConfigs[summaryConfig.provider]?.availableModels || []}
-                                            onChange={(val) => onUpdateSettings(brainstormConfig, {...summaryConfig, model: val}, suggestionConfig, providerConfigs)}
-                                            placeholder="Select Model"
-                                        />
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">System Role (Persona)</label>
-                                        <textarea 
-                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                            value={summaryConfig.systemRole}
-                                            onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, systemRole: e.target.value}, suggestionConfig, providerConfigs)}
-                                            placeholder="You are an expert summarizer..."
-                                        />
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Instruction Template</label>
-                                        <textarea 
-                                            className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar"
-                                            value={summaryConfig.instruction}
-                                            onChange={(e) => onUpdateSettings(brainstormConfig, {...summaryConfig, instruction: e.target.value}, suggestionConfig, providerConfigs)}
-                                                placeholder="Variables: {currentChapter}, {pov}, {tense}, {chapterSummary:1}, {lastWords:500}"
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                   </div>
-               </div>
-           </div>
-       )}
-
-       {/* Prompt Kind Editor Modal */}
-       {isKindModalOpen && editingKind && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setIsKindModalOpen(false)}>
-            <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[600px] max-w-[90vw] flex flex-col overflow-hidden h-[85vh]" onClick={(e) => e.stopPropagation()}>
-                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-850">
-                    <h3 className="font-bold text-slate-200 flex items-center gap-2"><Sparkles size={18} className="text-indigo-400"/> Configure Prompt Kind</h3>
-                    <button onClick={() => setIsKindModalOpen(false)} className="text-slate-500 hover:text-white"><X size={20} /></button>
-                </div>
-                
-                <div className="p-6 overflow-y-auto flex-1 space-y-5 custom-scrollbar">
-                    <div>
-                        <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Name</label>
-                        <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" value={editingKind.name} onChange={(e) => setEditingKind({...editingKind, name: e.target.value})} placeholder="e.g., Rewrite Scene"/>
-                    </div>
-                     <div>
-                        <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Description</label>
-                        <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" value={editingKind.description || ''} onChange={(e) => setEditingKind({...editingKind, description: e.target.value})} placeholder="Short description"/>
-                    </div>
-
-                    <div className="p-4 border border-slate-800 rounded-lg bg-slate-950/50 space-y-4">
-                        <h4 className="text-xs font-bold text-indigo-400 uppercase mb-2 flex items-center gap-2"><Sliders size={12}/> LLM Configuration</h4>
-                        
-                        <div>
-                            <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Provider</label>
-                            <select 
-                                className="w-full bg-slate-900 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500 capitalize"
-                                value={editingKind.provider}
-                                onChange={(e) => setEditingKind({ ...editingKind, provider: e.target.value as LLMProvider })}
-                            >
-                                <option value="google">Google Gemini</option>
-                                <option value="openrouter">OpenRouter</option>
-                                <option value="lmstudio">LM Studio</option>
-                                <option value="venice">Venice AI</option>
-                            </select>
-                        </div>
-
-                         <div>
-                             <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Model Selection</label>
-                             <SearchableModelSelect 
-                                value={editingKind.model}
-                                options={providerConfigs[editingKind.provider]?.availableModels || []}
-                                onChange={(val) => setEditingKind({ ...editingKind, model: val })}
-                                placeholder="Select a model"
-                             />
-                             <p className="text-[10px] text-slate-500 mt-1">
-                                 Models must be loaded in the <span className="font-bold">Settings</span> tab first.
-                             </p>
-                         </div>
-                         
-                         <div className="flex gap-4">
-                            <div className="flex-1">
-                                <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Max Tokens</label>
-                                <input 
-                                    type="number" 
-                                    className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-2 text-sm outline-none focus:border-indigo-500"
-                                    value={editingKind.maxTokens || 2048}
-                                    onChange={(e) => setEditingKind({...editingKind, maxTokens: parseInt(e.target.value) || 0})}
-                                />
-                            </div>
-                            <div className="flex-1">
-                                <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Temperature ({editingKind.temperature ?? 0.7})</label>
-                                <input 
-                                    type="range" 
-                                    min="0" 
-                                    max="2" 
-                                    step="0.1"
-                                    className="w-full accent-indigo-500 mt-2"
-                                    value={editingKind.temperature ?? 0.7}
-                                    onChange={(e) => setEditingKind({...editingKind, temperature: parseFloat(e.target.value)})}
-                                />
-                            </div>
-                         </div>
-                    </div>
-
-                    <div>
-                        <label className="block text-xs font-bold text-slate-400 uppercase mb-1">System Role (Persona)</label>
-                        <textarea className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm h-24 resize-none outline-none focus:border-indigo-500 font-sans leading-relaxed" value={editingKind.systemRole} onChange={(e) => setEditingKind({...editingKind, systemRole: e.target.value})}/>
-                    </div>
-
-                    <div>
-                        <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Instruction Template</label>
-                         <p className="text-[10px] text-slate-500 mb-1">Variables: &#123;currentChapter&#125;, &#123;pov&#125;, &#123;tense&#125;, &#123;chapterSummary:1&#125;, &#123;lastWords:500&#125;, &#123;storySoFar&#125;</p>
-                        <textarea className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm h-32 resize-none outline-none focus:border-indigo-500 font-mono leading-relaxed" value={editingKind.instruction} onChange={(e) => setEditingKind({...editingKind, instruction: e.target.value})}/>
-                    </div>
-                </div>
-
-                <div className="p-4 border-t border-slate-800 flex justify-between items-center bg-slate-850">
-                    <button onClick={() => deletePromptKind(editingKind.id)} className="text-red-400 hover:text-red-300 text-sm flex items-center gap-2 px-2"><Trash2 size={16} /> Delete Kind</button>
-                    <div className="flex gap-3">
-                         <button onClick={() => setIsKindModalOpen(false)} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
-                        <button onClick={savePromptKind} className="px-6 py-2 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500 shadow-lg shadow-indigo-500/20 transition-all">Save</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-       )}
-
-       {/* Codex Editor Modal */}
-       {isCodexModalOpen && (
-           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setIsCodexModalOpen(false)}>
-               <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[800px] max-w-[90vw] flex flex-col overflow-hidden max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
-                    <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-850">
-                       <h3 className="font-bold text-slate-200 flex items-center gap-2"><BookOpen size={18} className="text-indigo-400"/> {editingCodexId ? 'Edit Codex Entry' : 'New Codex Entry'}</h3>
-                       <button onClick={() => setIsCodexModalOpen(false)} className="text-slate-500 hover:text-white"><X size={20} /></button>
-                   </div>
-                   <div className="p-6 flex-1 overflow-y-auto space-y-4">
-                       <div className="flex items-center gap-4">
-                           <div className="flex-1">
-                               <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Title</label>
-                               <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" placeholder="Entry Title" value={newCodexTitle} onChange={(e) => setNewCodexTitle(e.target.value)} autoFocus/>
-                           </div>
-                           <div className="flex items-center pt-5">
-                                <label className="flex items-center gap-2 cursor-pointer select-none">
-                                    <input type="checkbox" checked={newCodexIsGlobal} onChange={(e) => setNewCodexIsGlobal(e.target.checked)} className="rounded border-slate-800 bg-slate-950 text-indigo-600 focus:ring-indigo-500 w-4 h-4"/>
-                                    <span className="text-sm text-slate-300 flex items-center gap-1"><Globe size={14} /> Global Entry</span>
-                                </label>
-                           </div>
-                       </div>
-                       
-                       <div>
-                           <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Tags</label>
-                           <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" placeholder="comma, separated, tags" value={newCodexTags} onChange={(e) => setNewCodexTags(e.target.value)}/>
-                           <p className="text-[10px] text-slate-500 mt-1">If these tags appear in your prompt, this entry will be included in the context.</p>
-                       </div>
-
-                       <div className="flex-1 flex flex-col h-full min-h-[300px]">
-                           <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Content</label>
-                           <textarea className="flex-1 w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar" placeholder="Detailed information..." value={newCodexContent} onChange={(e) => setNewCodexContent(e.target.value)}/>
-                       </div>
-                   </div>
-                   <div className="p-4 border-t border-slate-800 flex justify-end gap-3 bg-slate-850">
-                        <button onClick={() => setIsCodexModalOpen(false)} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
-                        <button onClick={saveCodex} className="px-6 py-2 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500 shadow-lg shadow-indigo-500/20 transition-all flex items-center gap-2"><Save size={16}/> Save Entry</button>
-                   </div>
-               </div>
-           </div>
-       )}
-
-       {/* Character Editor Modal */}
-       {isCharacterModalOpen && (
-           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setIsCharacterModalOpen(false)}>
-               <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-[800px] max-w-[90vw] flex flex-col overflow-hidden max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
-                    <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-850">
-                       <h3 className="font-bold text-slate-200 flex items-center gap-2"><Users size={18} className="text-indigo-400"/> {editingCharId ? 'Edit Character' : 'New Character'}</h3>
-                       <button onClick={() => setIsCharacterModalOpen(false)} className="text-slate-500 hover:text-white"><X size={20} /></button>
-                   </div>
-                   <div className="p-6 flex-1 overflow-y-auto">
-                       <div className="flex gap-6 mb-6">
-                            {/* Image Upload Section */}
-                            <div className="w-40 flex-shrink-0">
-                                <label className="block text-xs font-bold text-slate-400 uppercase mb-2 text-center">Portrait</label>
-                                <div className="relative w-40 h-40 rounded-xl bg-slate-950 border-2 border-dashed border-slate-700 flex items-center justify-center overflow-hidden group cursor-pointer hover:border-indigo-500 transition-colors shadow-inner">
-                                    {charImage ? (
-                                        <>
-                                            <img src={charImage} alt="Character" className="w-full h-full object-cover" />
-                                            <button onClick={(e) => { e.stopPropagation(); setCharImage(null); }} className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-red-400"><Trash2 size={24}/></button>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <div className="flex flex-col items-center gap-2">
-                                                <ImageIcon size={32} className="text-slate-600 group-hover:text-indigo-400 transition-colors"/>
-                                                <span className="text-xs text-slate-600">Upload Image</span>
-                                            </div>
-                                            <input type="file" accept="image/*" className="absolute inset-0 opacity-0 cursor-pointer" onChange={handleCharImageUpload} />
-                                        </>
-                                    )}
-                                </div>
-                            </div>
-
-                            {/* Info Section */}
-                            <div className="flex-1 space-y-4">
-                                <div className="flex gap-4">
-                                    <div className="flex-1">
-                                        <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Name</label>
-                                        <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" placeholder="Character Name" value={charName} onChange={(e) => setCharName(e.target.value)} autoFocus/>
-                                    </div>
-                                    <div className="flex items-center pt-5">
-                                        <label className="flex items-center gap-2 cursor-pointer select-none">
-                                            <input type="checkbox" checked={charIsGlobal} onChange={(e) => setCharIsGlobal(e.target.checked)} className="rounded border-slate-800 bg-slate-950 text-indigo-600 focus:ring-indigo-500 w-4 h-4"/>
-                                            <span className="text-sm text-slate-300 flex items-center gap-1"><Globe size={14} /> Global</span>
-                                        </label>
-                                    </div>
-                                </div>
-                                <div>
-                                   <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Aliases</label>
-                                   <input className="w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm outline-none focus:border-indigo-500" placeholder="comma, separated, names" value={charAliases} onChange={(e) => setCharAliases(e.target.value)}/>
-                                   <p className="text-[10px] text-slate-500 mt-1">Used to detect mentions in the text.</p>
-                                </div>
-                            </div>
-                       </div>
-                       
-                       <div className="flex-col h-[300px] flex">
-                           <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Description</label>
-                           <textarea className="flex-1 w-full bg-slate-950 border border-slate-800 rounded px-3 py-2 text-sm resize-none outline-none focus:border-indigo-500 leading-relaxed custom-scrollbar" placeholder="Detailed physical description, personality, background..." value={charDesc} onChange={(e) => setCharDesc(e.target.value)}/>
-                       </div>
-                   </div>
-                   <div className="p-4 border-t border-slate-800 flex justify-end gap-3 bg-slate-850">
-                        <button onClick={() => setIsCharacterModalOpen(false)} className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors">Cancel</button>
-                        <button onClick={saveCharacter} className="px-6 py-2 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500 shadow-lg shadow-indigo-500/20 transition-all flex items-center gap-2"><Save size={16}/> Save Character</button>
-                   </div>
-               </div>
-           </div>
-       )}
-    </div>
-  );
-};
+                                            onChange={(e) => onUpdateSettings({...brainstormConfig, instruction: e.target.value}, summaryConfig, suggestionConfig

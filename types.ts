@@ -85,6 +85,7 @@ export interface SuggestionConfig {
   systemRole: string;
   instruction: string;
   count: number;
+  typingSpeed?: number; // ms per word
   activeModeId?: string; // ID of the currently active SuggestionMode
   rephrase: {
       systemRole: string;

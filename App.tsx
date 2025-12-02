@@ -65,6 +65,7 @@ const DEFAULT_SUGGESTION_CONFIG: SuggestionConfig = {
     provider: 'google',
     model: 'gemini-2.5-flash',
     count: 5,
+    typingSpeed: 50,
     systemRole: DEFAULT_SUGGESTION_SYSTEM_ROLE,
     instruction: DEFAULT_SUGGESTION_INSTRUCTION,
     activeModeId: 'mode_plot_dev',
@@ -238,6 +239,10 @@ const App: React.FC = () => {
         }
         if (!suggestionConfig.expand) {
             suggestionConfig.expand = DEFAULT_SUGGESTION_CONFIG.expand;
+        }
+        
+        if (suggestionConfig.typingSpeed === undefined) {
+            suggestionConfig.typingSpeed = 50;
         }
 
         // Suggestion Modes Migration/Init
